@@ -41,6 +41,7 @@ from joblib import Parallel, delayed
 from sklearn.linear_model import ElasticNet
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.preprocessing import StandardScaler
+from tqdm import tqdm
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -1157,12 +1158,14 @@ def run_elastic_net(
     # Hyperparameters are tuned every year by fitting each combo on
     # train_start … test_year - 2 and evaluating on test_year - 1.
     # The final model is fit on the full training window (train_start … test_year - 1).
-    for reest_idx, test_year in enumerate(test_years):
+    year_pbar = tqdm(test_years, desc="Elastic Net", unit="year", ncols=90, leave=True)
+    for reest_idx, test_year in enumerate(year_pbar):
         loop_start = time.time()
         train_end_year = test_year - 1   # final model uses data through this year
         tune_train_end = test_year - 2   # tuning training data excludes val year
         val_year       = test_year - 1   # rolling 12-month validation window
 
+        year_pbar.set_postfix(year=test_year, stage="tuning")
         logger.info("")
         logger.info("─" * 55)
         logger.info("RE-ESTIMATION  %d / %d  →  val=%d, forecast=%d",
@@ -1308,6 +1311,7 @@ def run_elastic_net(
         )
 
         # ── Fit final models on full training window (hyperparams are fixed) ─
+        year_pbar.set_postfix(year=test_year, stage="fitting")
         logger.info("  Fitting final OLS model  (α=%.5f, l1_ratio=%.2f) …",
                     best_alpha_ols, best_l1_ols)
         t0 = time.time()
@@ -1452,6 +1456,12 @@ def run_elastic_net(
         })
 
         elapsed = time.time() - loop_start
+        year_pbar.set_postfix(
+            year=test_year,
+            r2_ols=f"{r2_ols:.3f}",
+            r2_hub=f"{r2_huber:.3f}",
+            min=f"{elapsed/60:.1f}",
+        )
         logger.info("  Re-estimation %d complete  (%.1f min elapsed)",
                     test_year, elapsed / 60)
 
