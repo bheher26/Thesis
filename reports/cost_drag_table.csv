@@ -1,0 +1,7 @@
+Model,Description,Gross Sharpe,Net Sharpe,Sharpe Drag,Avg Turnover/Mo (%),Avg Cost/Mo (bps)
+Level 0,1/N Equal-Weight,0.698,0.697,-0.001,0.9,0.09
+Level 1,FF5 Static,0.362,0.352,-0.009,16.5,1.65
+Level 1.5,FF5 + Macro Ridge,0.625,0.601,-0.024,41.1,4.1
+Level 2,VAR-FF5,0.623,0.598,-0.025,45.3,4.53
+Level 3a,Elastic Net (OLS),0.537,0.479,-0.058,92.5,9.26
+Level 3b,Elastic Net (Huber),0.58,0.52,-0.06,92.5,9.25

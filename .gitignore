@@ -1,0 +1,26 @@
+# Secrets
+.env
+
+# Data (too large for GitHub)
+data_raw/
+data_clean/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+*.egg-info/
+dist/
+build/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude
+.claude/
