@@ -92,7 +92,7 @@ DEFAULT_CONFIG: Dict = {
     # default (they also report sqrt as competitive).
     "n_estimators_grid": [100, 300],
     "max_depth_grid":    [2, 3, 4, 5],
-    "max_features_grid": ["sqrt", 0.1, 0.3],
+    "max_features_grid": ["sqrt", 0.1, 0.3, 1/3],  # 1/3 ≈ P/3 per GKX default
 
     # ── Feature construction ─────────────────────────────────────────────
     "char_missing_threshold": 0.50,
@@ -116,6 +116,12 @@ DEFAULT_CONFIG: Dict = {
     # Setting both to -1 can over-subscribe CPUs; default splits by level.
     "n_jobs":    -1,   # joblib for HP search
     "rf_n_jobs": -1,   # sklearn RF internal parallelism
+
+    # ── Tuning data cap ───────────────────────────────────────────────────
+    # Cap training rows used during HP search.  The expanding window can reach
+    # ~300k+ rows; keeping the most recent 100k is a good balance between
+    # representativeness and memory safety (100k×730×float32 ≈ 290 MB).
+    "max_tune_train_obs": 100_000,
 
     # ── Random seed ───────────────────────────────────────────────────────
     "random_state": 42,
@@ -186,7 +192,7 @@ def _cv_score_rf(
                 n_jobs=n_jobs,
                 random_state=random_state,
                 bootstrap=True,
-                min_samples_leaf=5,   # GKX: prevents over-fitting to noise
+                min_samples_leaf=30,  # GKX-consistent: ~6 leaves at depth 2-3 on large N
             )
             rf.fit(X_tr, y_tr)
             y_pred = rf.predict(X_vl)
@@ -375,7 +381,7 @@ def fit_rf_model(
         n_jobs=config.get("rf_n_jobs", -1),
         random_state=config.get("random_state", 42),
         bootstrap=True,
-        min_samples_leaf=5,
+        min_samples_leaf=30,  # GKX-consistent: ~6 leaves at depth 2-3 on large N
     )
     rf.fit(X_train, y_train)
     return rf
@@ -500,17 +506,18 @@ def run_random_forest(
     # ── Main loop ─────────────────────────────────────────────────────────
     year_pbar = tqdm(test_years, desc="Random Forest", unit="year", ncols=90, leave=True)
     for reest_idx, test_year in enumerate(year_pbar):
-        loop_start     = time.time()
-        train_end_year = test_year - 1
-        tune_train_end = test_year - 2
-        val_year       = test_year - 1
+        loop_start      = time.time()
+        train_end_year  = test_year - 1
+        val_end_year    = test_year - 1   # val window: [val_start, val_end]
+        val_start_year  = test_year - 3   # 3-year rolling val; reduces HP selection noise
+        tune_train_end  = test_year - 4   # tuning train ends 1 year before val starts
 
         year_pbar.set_postfix(year=test_year, stage="tuning")
         logger.info("")
         logger.info("─" * 55)
         logger.info(
-            "RE-ESTIMATION  %d / %d  →  val=%d, forecast=%d",
-            reest_idx + 1, len(test_years), val_year, test_year,
+            "RE-ESTIMATION  %d / %d  →  val=%d–%d, forecast=%d",
+            reest_idx + 1, len(test_years), val_start_year, val_end_year, test_year,
         )
         logger.info("─" * 55)
 
@@ -545,7 +552,7 @@ def run_random_forest(
             tune_macro_means, tune_macro_stds,
         )
 
-        mask_val = (df["year"] == val_year)
+        mask_val = (df["year"] >= val_start_year) & (df["year"] <= val_end_year)
         df_val_roll = pd.DataFrame(df[mask_val])
         X_val_roll, y_val_roll, _, _ = _build_single_window(
             df_val_roll, tune_chars, tune_medians,
@@ -553,14 +560,14 @@ def run_random_forest(
             tune_macro_means, tune_macro_stds,
         )
         logger.info(
-            "  Tuning train: {:,} rows ({} – {})  |  Val: {:,} rows (year {})".format(
+            "  Tuning train: {:,} rows ({} – {})  |  Val: {:,} rows ({} – {})".format(
                 X_tune_train.shape[0], cfg["train_start_year"], tune_train_end,
-                X_val_roll.shape[0], val_year,
+                X_val_roll.shape[0], val_start_year, val_end_year,
             )
         )
 
         # ── Tune RF hyperparameters ───────────────────────────────────────
-        logger.info("  Tuning RF hyperparameters (rolling val %d) …", val_year)
+        logger.info("  Tuning RF hyperparameters (rolling val %d–%d) …", val_start_year, val_end_year)
         t0 = time.time()
         best_n_est, best_depth, best_mf, val_surface = tune_hyperparameters_rf(
             X_val_roll, y_val_roll, cfg, logger,
@@ -693,7 +700,7 @@ def run_random_forest(
             "reest_year":        test_year,
             "train_start":       cfg["train_start_year"],
             "train_end":         train_end_year,
-            "val_year":          val_year,
+            "val_year":          val_end_year,
             "n_train_obs":       len(df_train),
             "n_train_valid_obs": int(X_train_mat.shape[0]),
             "n_features":        int(X_train_mat.shape[1]),
@@ -882,6 +889,10 @@ def make_rf_expected_returns_fn(
         ]
         month_slice = pd.DataFrame(month_slice).drop_duplicates(subset=["permno"])
         month_fc = month_slice.set_index("permno")["expected_ret"]
+        # Cross-sectionally re-rank to [-1, 1] so the optimizer sees a consistent
+        # signal scale regardless of RF prediction compression (tree averaging
+        # shrinks raw outputs toward zero, weakening portfolio tilts).
+        month_fc = _rank_series_pm1(month_fc)
         mu = month_fc.reindex(ret_matrix.columns)
         n_valid = mu.notna().sum()
         n_total = len(mu)

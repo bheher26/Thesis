@@ -39,6 +39,7 @@ import numpy as np
 import pandas as pd
 from joblib import Parallel, delayed
 from scipy.stats import rankdata, spearmanr
+from sklearn.decomposition import PCA
 from sklearn.linear_model import ElasticNet, SGDRegressor
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.preprocessing import StandardScaler
@@ -92,13 +93,21 @@ DEFAULT_CONFIG: Dict = {
     # ── Hyperparameter grid ──────────────────────────────────────────────
     # alpha  = regularisation strength (λ in the paper)
     # l1_ratio = weight on L1 vs L2 (sklearn convention: 1 = LASSO, 0 = ridge)
-    # Fix 2: extend alpha upper bound to 100 (logspace -4→2).  With 920 features
-    # the effective per-feature λ is alpha/920 ≈ 0.001 at alpha=1, which is far
-    # too weak; alpha up to 100 covers the useful shrinkage range.
-    # Fix 3: add l1_ratio=0.01 (near-pure ridge) so the grid includes a stable
-    # ridge anchor that prevents pure-LASSO coefficient flips across years.
-    "alpha_grid":         list(np.logspace(-4, 2, 6)),   # 6 values → 18 OLS / 72 Huber combos
-    "l1_ratio_grid":      [0.1, 0.5, 0.9],
+    # Alpha grid: logspace -3→1 (20 values).  With PCA pre-projection the
+    # effective number of features is ~50-100 orthogonal PCs (vs 920 correlated
+    # raw features), so the per-feature penalty scales differently. logspace(-3,1)
+    # covers alpha=0.001 (near-unpenalised) through alpha=10 (strong shrinkage).
+    # KNS: L2-only ridge already works well; the combined approach needs less
+    # alpha range than raw-feature elastic net.
+    "alpha_grid":         list(np.logspace(-3, 1, 20)),
+
+    # l1_ratio grid: capped at 0.5.  KNS (p.279) is explicit that near-LASSO
+    # performs poorly when regressors are correlated.  Even after PCA the
+    # PC scores share information from correlated raw characteristics (same
+    # macro variables interact with all chars).  Removing values > 0.5 prevents
+    # the model from collapsing to a near-empty solution.  Pure ridge (0.0) is
+    # included as the KNS-motivated anchor.
+    "l1_ratio_grid":      [0.0, 0.01, 0.1, 0.3, 0.5],
     "huber_epsilon":      1.35,       # Huber threshold default (overridden by tuning)
     "huber_epsilon_grid": [0.5, 0.7, 0.9, 1.35],
 
@@ -171,6 +180,19 @@ DEFAULT_CONFIG: Dict = {
     # Fix 8: limit permutation-VI computation to top N features by coefficient
     # magnitude (OLS ∪ Huber).  Full-feature VI on 920 cols × val window is slow.
     "max_vi_features":     50,
+
+    # ── PCA pre-projection ───────────────────────────────────────────────
+    # KNS (2020): elastic net on raw correlated characteristics collapses to
+    # near-empty solutions (3-8 non-zero coefs); the same model in PC space
+    # retains 10-30 orthogonal components and achieves much higher OOS R².
+    # L1 regularisation works correctly on orthogonal features — it selects
+    # the most informative PCs rather than arbitrarily picking one member of
+    # each correlated group.
+    #
+    # pca_n_components: float → fraction of variance explained (0.95 retains
+    # ~50-100 PCs from 920 raw features); int → exact number of components;
+    # None → disabled (raw features passed through, original behaviour).
+    "pca_n_components":    0.95,
 }
 
 # ============================================================
@@ -1144,6 +1166,55 @@ def _select_epsilon_fast(
 # Final Model Fitting
 # ============================================================
 
+def fit_pca_projector(
+    X_train: np.ndarray,
+    n_components,
+) -> Tuple[StandardScaler, PCA]:
+    """
+    Fit a (StandardScaler → PCA) pipeline on training data.
+
+    PCA requires centred/scaled input so the scaler is fitted first.
+    Callers apply this projector to val/test data using the same fitted
+    objects — no leakage because the projector is never re-fitted on
+    out-of-sample data.
+
+    Parameters
+    ----------
+    X_train      : raw feature matrix, shape (n, p)
+    n_components : passed to PCA — float for variance explained (e.g. 0.95),
+                   int for exact number of components, None to skip PCA
+                   (returns identity projector with StandardScaler only)
+
+    Returns
+    -------
+    scaler : fitted StandardScaler
+    pca    : fitted PCA  (or None if n_components is None)
+    """
+    scaler = StandardScaler()
+    X_s = scaler.fit_transform(X_train.astype(np.float64))
+    if n_components is None:
+        return scaler, None
+    pca = PCA(n_components=n_components, svd_solver="full", random_state=42)
+    pca.fit(X_s)
+    return scaler, pca
+
+
+def apply_pca_projector(
+    scaler: StandardScaler,
+    pca: Optional[PCA],
+    X: np.ndarray,
+) -> np.ndarray:
+    """
+    Apply a fitted (StandardScaler → PCA) projector to X.
+
+    If pca is None, returns standardised X (scaler only).
+    """
+    X_s = scaler.transform(X.astype(np.float64))
+    if pca is None:
+        return X_s
+    return pca.transform(X_s)
+
+
 def fit_ols_model(
     X_train: np.ndarray,
     y_train: np.ndarray,
@@ -1545,12 +1616,28 @@ def run_elastic_net(
             )
         )
 
+        # ── PCA pre-projection (tuning phase) ─────────────────────────────
+        # KNS (2020): elastic net in PC space retains 10-30 informative
+        # components instead of collapsing to 3-8 raw-feature coefficients.
+        # PCA is fitted on tune training data only; val projection uses the
+        # same fitted objects — no leakage.
+        pca_k = cfg.get("pca_n_components", 0.95)
+        pca_scaler_tune, pca_tune = fit_pca_projector(X_tune_train, pca_k)
+        X_tune_train_pc = apply_pca_projector(pca_scaler_tune, pca_tune, X_tune_train)
+        X_val_roll_pc   = apply_pca_projector(pca_scaler_tune, pca_tune, X_val_roll)
+        n_pcs_tune = X_tune_train_pc.shape[1]
+        logger.info(
+            "  PCA (tuning): %d raw features → %d PCs  (%.1f%% variance)",
+            X_tune_train.shape[1], n_pcs_tune,
+            100 * (pca_tune.explained_variance_ratio_.sum() if pca_tune is not None else 1.0),
+        )
+
         # ── Tune hyperparameters: fit on tune_train, evaluate on val ──────
         logger.info("  Tuning OLS hyperparameters (rolling val %d–%d) …", val_start_year, val_end_year)
         t0 = time.time()
         best_alpha_ols, best_l1_ols, val_surface_ols, _ = tune_hyperparameters(
-            X_val_roll, y_val_roll, cfg, "ols", logger,
-            X_train_ext=X_tune_train, y_train_ext=y_tune_train,
+            X_val_roll_pc, y_val_roll, cfg, "ols", logger,
+            X_train_ext=X_tune_train_pc, y_train_ext=y_tune_train,
         )
         logger.info("  OLS chosen: α=%.5f, l1_ratio=%.2f  (%.1fs)",
                     best_alpha_ols, best_l1_ols, time.time() - t0)
@@ -1578,8 +1665,8 @@ def run_elastic_net(
         logger.info("  Selecting Huber epsilon (fast SGD sweep, val %d–%d) …", val_start_year, val_end_year)
         t0 = time.time()
         best_epsilon_hub = _select_epsilon_fast(
-            X_tune_train, y_tune_train,
-            X_val_roll, y_val_roll,
+            X_tune_train_pc, y_tune_train,
+            X_val_roll_pc, y_val_roll,
             alpha=best_alpha_hub,
             l1_ratio=best_l1_hub,
             epsilon_grid=cfg["huber_epsilon_grid"],
@@ -1645,18 +1732,34 @@ def run_elastic_net(
             logger.warning("  Skipping %d: too few valid training observations", test_year)
             continue
 
+        # ── PCA pre-projection (final model phase) ────────────────────────
+        # Re-fit PCA on the full training window (includes val year); the
+        # tuning-phase PCA was fitted on a shorter window and is discarded.
+        # All subsequent matrices (val, test) are projected with this projector.
+        pca_scaler_final, pca_final = fit_pca_projector(X_train, pca_k)
+        X_train_pc = apply_pca_projector(pca_scaler_final, pca_final, X_train)
+        n_pcs_final = X_train_pc.shape[1]
+        logger.info(
+            "  PCA (final):  %d raw features → %d PCs  (%.1f%% variance)",
+            X_train.shape[1], n_pcs_final,
+            100 * (pca_final.explained_variance_ratio_.sum() if pca_final is not None else 1.0),
+        )
+        # PC feature names for diagnostics output
+        pc_feature_names = [f"PC_{i+1}" for i in range(n_pcs_final)]
+
         # ── Build validation feature matrix (for variable importance only) ─
         # Use the full rolling val window (val_start_year … val_end_year),
         # re-encoded with final training-window statistics for feature alignment.
         mask_val_vi = (df["year"] >= val_start_year) & (df["year"] <= val_end_year)
         df_val_vi = pd.DataFrame(df[mask_val_vi])
-        X_val, y_val, _, _ = _build_single_window(
+        X_val_raw, y_val, _, _ = _build_single_window(
             df_val_vi, active_chars, train_medians,
             available_macro, industry_codes,
             macro_means, macro_stds,
             industry_medians=ind_medians,
             industry_adj_target=ind_adj,
         )
+        X_val_pc = apply_pca_projector(pca_scaler_final, pca_final, X_val_raw)
 
         # ── Fit final models on full training window (hyperparams are fixed) ─
         year_pbar.set_postfix(year=test_year, stage="fitting")
@@ -1664,10 +1767,10 @@ def run_elastic_net(
                     best_alpha_ols, best_l1_ols)
         t0 = time.time()
         model_ols, scaler_ols = fit_ols_model(
-            X_train.astype(np.float64), y_train.astype(np.float64),
+            X_train_pc, y_train.astype(np.float64),
             best_alpha_ols, best_l1_ols, cfg,
         )
-        logger.info("  OLS fit done: %d non-zero coefs  (%.1fs)",
+        logger.info("  OLS fit done: %d non-zero PCs  (%.1fs)",
                     int(np.sum(model_ols.coef_ != 0)), time.time() - t0)
 
         # Fix 6: replace FISTA final fit with SGDRegressor (~30–60s vs 20–40 min)
@@ -1675,7 +1778,7 @@ def run_elastic_net(
                     best_alpha_hub, best_l1_hub, best_epsilon_hub)
         t0 = time.time()
         model_huber, scaler_huber = fit_huber_model_sgd(
-            X_train.astype(np.float64), y_train.astype(np.float64),
+            X_train_pc, y_train.astype(np.float64),
             best_alpha_hub, best_l1_hub, best_epsilon_hub, cfg,
         )
         n_nz_hub = int(np.sum(np.abs(model_huber.coef_) > 1e-10))
@@ -1686,19 +1789,21 @@ def run_elastic_net(
         mask_test = (df["year"] == test_year)
         df_test   = df[mask_test].copy()
         logger.info("  Building test feature matrix (year=%d) …", test_year)
-        X_test, y_test, _, valid_test_idx = _build_single_window(
+        X_test_raw, y_test, _, valid_test_idx = _build_single_window(
             df_test, active_chars, train_medians,
             available_macro, industry_codes,
             macro_means, macro_stds,
             industry_adj_target=ind_adj,
         )
-        logger.info("  Test matrix: %s rows × %s features", X_test.shape[0], X_test.shape[1])
+        X_test_pc = apply_pca_projector(pca_scaler_final, pca_final, X_test_raw)
+        logger.info("  Test matrix: %s rows × %s PCs (from %s raw features)",
+                    X_test_pc.shape[0], X_test_pc.shape[1], X_test_raw.shape[1])
 
         # ── Predict expected returns ───────────────────────────────────────
-        X_test_ols_s = scaler_ols.transform(X_test.astype(np.float64))
+        X_test_ols_s = scaler_ols.transform(X_test_pc)
         y_pred_ols   = model_ols.predict(X_test_ols_s)
 
-        X_test_hub_s = scaler_huber.transform(X_test.astype(np.float64))
+        X_test_hub_s = scaler_huber.transform(X_test_pc)
         y_pred_huber = model_huber.predict(X_test_hub_s)
 
         # ── OOS R² ────────────────────────────────────────────────────────
@@ -1811,13 +1916,13 @@ def run_elastic_net(
 
         feat_rows_ols = [
             {"reest_year": test_year, "loss": "ols",
-             "feature": feature_names[i], "coef": float(ols_coefs[i])}
-            for i in ols_nz_idx if i < len(feature_names)
+             "feature": pc_feature_names[i], "coef": float(ols_coefs[i])}
+            for i in ols_nz_idx if i < len(pc_feature_names)
         ]
         feat_rows_hub = [
             {"reest_year": test_year, "loss": "huber",
-             "feature": feature_names[i], "coef": float(hub_coefs[i])}
-            for i in hub_nz_idx if i < len(feature_names)
+             "feature": pc_feature_names[i], "coef": float(hub_coefs[i])}
+            for i in hub_nz_idx if i < len(pc_feature_names)
         ]
         feat_df = pd.DataFrame(feat_rows_ols + feat_rows_hub)
         all_feat_selection.append(feat_df)
@@ -1826,7 +1931,7 @@ def run_elastic_net(
         logger.info("  Computing variable importance on validation window …")
         t0 = time.time()
         vi_df = compute_variable_importance(
-            model_ols, scaler_ols, model_huber, scaler_huber, X_val, y_val, feature_names,
+            model_ols, scaler_ols, model_huber, scaler_huber, X_val_pc, y_val, pc_feature_names,
             max_features=cfg.get("max_vi_features", 50),
         )
         vi_df.insert(0, "reest_year", test_year)
