@@ -37,10 +37,16 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 import time
 import warnings
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
+
+# Ensure the project root is on sys.path so `models.*` imports work whether
+# this file is run as a script (python models/level4_random_forest.py) or
+# imported as a module from the project root.
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 import numpy as np
 import pandas as pd
@@ -224,16 +230,27 @@ def tune_hyperparameters_rf(
     n_estimators_grid = config["n_estimators_grid"]
     max_depth_grid    = config["max_depth_grid"]
     max_features_grid = config["max_features_grid"]
-    n_jobs            = config["n_jobs"]
-    rf_n_jobs         = config.get("rf_n_jobs", 1)
+    rf_n_jobs         = config.get("rf_n_jobs", -1)
     random_state      = config.get("random_state", 42)
+    # Maximum training rows used during HP search.  The expanding window grows
+    # to ~200k+ rows but the most recent data is most informative for tuning.
+    # Using all rows for 24 RF fits is very slow; cap at 50k (most recent rows).
+    max_tune_obs      = config.get("max_tune_train_obs", 50_000)
 
     # Build split indices (single fold for GKX rolling mode)
     if X_train_ext is not None and y_train_ext is not None:
-        n_tr = len(X_train_ext)
+        # Subsample tuning training data: keep the most recent max_tune_obs rows
+        # (X_train_ext is ordered chronologically so recent rows are at the end).
+        if len(X_train_ext) > max_tune_obs:
+            X_train_tune = X_train_ext[-max_tune_obs:]
+            y_train_tune = y_train_ext[-max_tune_obs:]
+        else:
+            X_train_tune = X_train_ext
+            y_train_tune = y_train_ext
+        n_tr = len(X_train_tune)
         n_vl = len(X_val)
-        X_tv = np.vstack([X_train_ext, X_val])
-        y_tv = np.concatenate([y_train_ext, y_val])
+        X_tv = np.vstack([X_train_tune, X_val])
+        y_tv = np.concatenate([y_train_tune, y_val])
         split_indices = [(np.arange(n_tr), np.arange(n_tr, n_tr + n_vl))]
     else:
         # Fallback: single temporal split within X_val (60/40 train/val)
@@ -243,30 +260,45 @@ def tune_hyperparameters_rf(
         y_tv = y_val
         split_indices = [(np.arange(split_pt), np.arange(split_pt, n_total))]
 
+    # During tuning use fewer trees (50) — enough to rank hyperparameter
+    # combinations reliably while being ~4–6× faster than the full count.
+    # The final model is fit with the full n_estimators from the grid.
+    tune_n_estimators = [min(50, n) for n in n_estimators_grid]
+
     n_grid = len(n_estimators_grid) * len(max_depth_grid) * len(max_features_grid)
     logger.debug(
         "  RF tuning: %d n_est × %d depth × %d max_feat = %d combos, "
-        "n_train=%d, n_val=%d",
+        "n_train=%d (capped from %d), n_val=%d",
         len(n_estimators_grid), len(max_depth_grid), len(max_features_grid),
-        n_grid, len(y_tv) - len(y_val), len(y_val),
+        n_grid, len(X_tv) - len(X_val),
+        len(X_train_ext) if X_train_ext is not None else len(X_val),
+        len(y_val),
     )
 
-    # When n_jobs for outer grid search is set, disable RF internal parallelism
-    # to avoid over-subscription.  When outer search is sequential (n_jobs=1),
-    # let RF use its own parallelism.
-    outer_n_jobs = n_jobs
-    inner_n_jobs = 1 if (outer_n_jobs != 1) else rf_n_jobs
-
-    raw_scores = Parallel(n_jobs=outer_n_jobs, prefer="threads")(
-        delayed(_cv_score_rf)(
-            X_tv, y_tv, split_indices,
-            n_est, depth, mf,
-            inner_n_jobs, random_state,
-        )
+    # Run outer grid sequentially so each RF fit can use all CPU cores.
+    # prefer="threads" does not bypass Python's GIL for CPU-bound sklearn work,
+    # making parallel outer + single-core inner slower than sequential outer +
+    # multi-core inner on the Mac's efficiency/performance core layout.
+    tune_est_map = {n: min(50, n) for n in n_estimators_grid}
+    grid_combos = [
+        (n_est, depth, mf)
         for n_est in n_estimators_grid
         for depth in max_depth_grid
         for mf in max_features_grid
-    )
+    ]
+    raw_scores = [
+        _cv_score_rf(
+            X_tv, y_tv, split_indices,
+            tune_est_map[n_est], depth, mf,
+            rf_n_jobs, random_state,
+        )
+        for n_est, depth, mf in tqdm(
+            grid_combos,
+            desc=f"  HP search {n_grid} combos",
+            leave=False,
+            ncols=80,
+        )
+    ]
 
     surface_rows = []
     best_score = -np.inf

@@ -89,7 +89,7 @@ for loss in ("ols", "huber"):
     print(f"  Avg monthly cost         : {summary['avg_monthly_cost_bps']:.2f} bps")
     print(f"{'='*60}")
 
-    print_benchmark_comparison(f"level3_{loss}", summary)
+    print_benchmark_comparison(f"level3_{loss}", summary, results_df=results)
 
     out_path = f"data_clean/level3_{loss}_results.csv"
     results.to_csv(out_path, index=False)

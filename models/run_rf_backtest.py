@@ -84,7 +84,7 @@ print(f"  Months at/below cap      : {pct_capped:.0f}%")
 print(f"  Avg monthly cost         : {summary['avg_monthly_cost_bps']:.2f} bps")
 print(f"{'='*60}")
 
-print_benchmark_comparison("level4_rf", summary)
+print_benchmark_comparison("level4_rf", summary, results_df=results)
 
 out_path = "data_clean/level4_rf_results.csv"
 results.to_csv(out_path, index=False)

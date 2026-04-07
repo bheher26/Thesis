@@ -323,7 +323,7 @@ if __name__ == "__main__":
     print(f"  Avg monthly cost         : {summary['avg_monthly_cost_bps']:.2f} bps")
     print("=" * 60)
 
-    print_benchmark_comparison("level1", summary)
+    print_benchmark_comparison("level1", summary, results_df=results)
 
     # --------------------------------------------------------
     # Save results

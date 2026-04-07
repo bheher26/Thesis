@@ -149,12 +149,16 @@ _MODEL_LABELS = {
 
 def print_benchmark_comparison(current_label, current_summary,
                                 benchmark_path=BENCHMARK_PATH,
-                                rf_series=None):
+                                rf_series=None,
+                                results_df=None):
     """
     Print a side-by-side comparison of the current model against the Level 0
     1/N benchmark. Call at the bottom of each model's __main__ block:
 
-        print_benchmark_comparison("level1", summary)
+        print_benchmark_comparison("level1", summary, results_df=results)
+
+    The benchmark is clipped to the same date range as results_df so that
+    all metrics are computed over an identical evaluation window.
 
     Parameters
     ----------
@@ -166,6 +170,10 @@ def print_benchmark_comparison(current_label, current_summary,
         Path to Level 0 results CSV.
     rf_series : pd.Series or None
         Forwarded to evaluate_results() for the benchmark.
+    results_df : pd.DataFrame or None
+        The raw results DataFrame for the current model (output of
+        run_backtest). When provided, the benchmark is clipped to the same
+        (year, month) range so the comparison is over identical periods.
     """
     print("\n" + "=" * 60)
     print("BENCHMARK COMPARISON vs. Level 0 (1/N)")
@@ -180,6 +188,26 @@ def print_benchmark_comparison(current_label, current_summary,
     try:
         r0 = pd.read_csv(benchmark_path)
         r0.columns = [c.strip().lower() for c in r0.columns]
+
+        # Clip benchmark to the same date window as the current model
+        if results_df is not None:
+            df_cur = results_df.copy()
+            df_cur.columns = [c.strip().lower() for c in df_cur.columns]
+            start_year  = int(df_cur["year"].min())
+            start_month = int(df_cur.loc[df_cur["year"] == start_year, "month"].min())
+            end_year    = int(df_cur["year"].max())
+            end_month   = int(df_cur.loc[df_cur["year"] == end_year, "month"].max())
+
+            r0 = r0[
+                ((r0["year"] > start_year) |
+                 ((r0["year"] == start_year) & (r0["month"] >= start_month))) &
+                ((r0["year"] < end_year) |
+                 ((r0["year"] == end_year) & (r0["month"] <= end_month)))
+            ].copy()
+
+            print(f"  [Evaluation window: {start_year}-{start_month:02d} → "
+                  f"{end_year}-{end_month:02d}  ({len(r0)} months)]")
+
         s0 = evaluate_results(r0, rf_series=rf_series)
     except Exception as e:
         print(f"  [Error] Could not load benchmark: {e}")

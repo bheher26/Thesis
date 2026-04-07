@@ -477,7 +477,7 @@ if __name__ == "__main__":
     print(f"  Avg monthly cost         : {summary['avg_monthly_cost_bps']:.2f} bps")
     print("=" * 60)
 
-    print_benchmark_comparison("level_1_5", summary)
+    print_benchmark_comparison("level_1_5", summary, results_df=results)
 
     os.makedirs("data_clean", exist_ok=True)
     out_path = "data_clean/level_1_5_results.csv"
