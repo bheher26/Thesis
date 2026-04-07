@@ -97,8 +97,8 @@ DEFAULT_CONFIG: Dict = {
     # too weak; alpha up to 100 covers the useful shrinkage range.
     # Fix 3: add l1_ratio=0.01 (near-pure ridge) so the grid includes a stable
     # ridge anchor that prevents pure-LASSO coefficient flips across years.
-    "alpha_grid":         list(np.logspace(-4, 2, 20)),
-    "l1_ratio_grid":      [0.01, 0.1, 0.3, 0.5, 0.7, 0.9],
+    "alpha_grid":         list(np.logspace(-4, 2, 6)),   # 6 values → 18 OLS / 72 Huber combos
+    "l1_ratio_grid":      [0.1, 0.5, 0.9],
     "huber_epsilon":      1.35,       # Huber threshold default (overridden by tuning)
     "huber_epsilon_grid": [0.5, 0.7, 0.9, 1.35],
 
@@ -108,7 +108,10 @@ DEFAULT_CONFIG: Dict = {
     "n_cv_splits": 5,
 
     # ── Feature construction ─────────────────────────────────────────────
-    "char_missing_threshold": 0.50,  # drop char if > 50 % missing in training
+    # Loosened to 0.70: elastic net can zero out uninformative sparse features
+    # itself via the L1 penalty, so it is better to let more characteristics in
+    # and let regularisation do the selection rather than pre-filtering too aggressively.
+    "char_missing_threshold": 0.70,  # drop char if > 70 % missing in training
 
     # ── Quality filters ──────────────────────────────────────────────────
     "min_train_obs":        1000,
@@ -146,9 +149,23 @@ DEFAULT_CONFIG: Dict = {
     "cv_max_train_n":      50_000,
 
     # ── Forecast post-processing ─────────────────────────────────────────
-    # Fix 4: winsorise cross-sectional forecasts at 1% each tail per month to
-    # prevent outlier predictions from dominating portfolio construction.
+    # Primary winsorisation at 1% per tail (GKX standard).  Raw (unwinsorised)
+    # forecasts are also saved as expected_ret_raw_ols / expected_ret_raw_huber
+    # so any threshold can be applied downstream without re-running the model.
     "forecast_winsor_pct": 0.01,
+
+    # ── Target variable ──────────────────────────────────────────────────
+    # industry_adj_target: subtract the equal-weight industry mean return from
+    # each stock's excess return within each (year, month, sic2) cell before
+    # fitting.  This focuses the model on within-industry cross-sectional
+    # variation and typically improves predictive R².  No leakage: industry means
+    # are computed from the contemporaneous cross-section, not future data.
+    "industry_adj_target": False,
+
+    # ── Imputation ───────────────────────────────────────────────────────
+    # Use SIC peer-group median for missing characteristics instead of the global
+    # cross-sectional median.  More accurate imputation for sparse characteristics.
+    "industry_imputation": True,
 
     # ── Variable importance ──────────────────────────────────────────────
     # Fix 8: limit permutation-VI computation to top N features by coefficient
@@ -391,12 +408,14 @@ def _build_single_window(
     macro_means: np.ndarray,
     macro_stds: np.ndarray,
     industry_medians: Optional[Dict[str, Dict[int, float]]] = None,
+    industry_adj_target: bool = False,
 ) -> Tuple[np.ndarray, np.ndarray, List[str], List]:
     """
     Build the GKX feature matrix and excess-return target for one data window.
 
     Processing steps (applied in order, using training statistics throughout):
       1. Compute excess return target: ret_adjusted - rf
+         (optionally industry-adjusted: subtract equal-weight sic2 mean per month)
       2. Impute each characteristic with its training-window median
       3. Cross-sectionally rank each characteristic to [-1, 1] within each month
       4. Construct interaction terms: char_i × macro_j for j in {1, constant}
@@ -431,7 +450,20 @@ def _build_single_window(
     )
     valid_mask = excess_ret.notna()
     df = df_window[valid_mask]           # view — no copy needed
-    y = excess_ret[valid_mask].values.astype(np.float32)
+    y_series = excess_ret[valid_mask]
+
+    if industry_adj_target:
+        # Subtract equal-weight sic2 industry mean from each stock's excess return
+        # within each (year, month) cross-section.  This is contemporaneous — no
+        # future data is used — so there is no leakage.
+        sic2_for_target = (
+            pd.to_numeric(df["siccd"], errors="coerce").fillna(-1) // 10
+        ).astype(int)
+        ind_month_key = df["year"].astype(str) + "_" + df["month"].astype(str) + "_" + sic2_for_target.astype(str)
+        ind_means = y_series.groupby(ind_month_key).transform("mean")
+        y_series  = y_series - ind_means
+
+    y = y_series.values.astype(np.float32)
     valid_idx = df_window.index[valid_mask].tolist()
     n_rows = len(df)
 
@@ -1417,6 +1449,8 @@ def run_elastic_net(
     # ── Output accumulation containers ───────────────────────────────────
     all_expected_ols      : List[pd.DataFrame] = []
     all_expected_huber    : List[pd.DataFrame] = []
+    all_expected_raw_ols  : List[pd.DataFrame] = []
+    all_expected_raw_huber: List[pd.DataFrame] = []
     all_oos_r2            : List[Dict]         = []
     all_metadata          : List[Dict]         = []
     all_feat_selection    : List[pd.DataFrame] = []
@@ -1487,10 +1521,12 @@ def run_elastic_net(
         tune_macro_means, tune_macro_stds = fit_macro_scaler(df_tune_train, available_macro)
 
         # ── Build tuning feature matrices ─────────────────────────────────
+        ind_adj = cfg.get("industry_adj_target", False)
         X_tune_train, y_tune_train, _, _ = _build_single_window(
             df_tune_train, tune_chars, tune_medians,
             available_macro, tune_industry,
             tune_macro_means, tune_macro_stds,
+            industry_adj_target=ind_adj,
         )
 
         # Fix 1: validation window spans val_start_year … val_end_year (val_w years)
@@ -1500,6 +1536,7 @@ def run_elastic_net(
             df_val_roll, tune_chars, tune_medians,
             available_macro, tune_industry,
             tune_macro_means, tune_macro_stds,
+            industry_adj_target=ind_adj,
         )
         logger.info(
             "  Tuning train: {:,} rows ({} – {})  |  Val: {:,} rows ({} – {})".format(
@@ -1599,6 +1636,7 @@ def run_elastic_net(
             available_macro, industry_codes,
             macro_means, macro_stds,
             industry_medians=ind_medians,
+            industry_adj_target=ind_adj,
         )
         logger.info("  Training matrix: %s rows × %s features  (%.1fs)",
                     X_train.shape[0], X_train.shape[1], time.time() - t0)
@@ -1617,6 +1655,7 @@ def run_elastic_net(
             available_macro, industry_codes,
             macro_means, macro_stds,
             industry_medians=ind_medians,
+            industry_adj_target=ind_adj,
         )
 
         # ── Fit final models on full training window (hyperparams are fixed) ─
@@ -1651,6 +1690,7 @@ def run_elastic_net(
             df_test, active_chars, train_medians,
             available_macro, industry_codes,
             macro_means, macro_stds,
+            industry_adj_target=ind_adj,
         )
         logger.info("  Test matrix: %s rows × %s features", X_test.shape[0], X_test.shape[1])
 
@@ -1668,10 +1708,13 @@ def run_elastic_net(
 
         # ── Attach forecast metadata back to test rows ─────────────────────
         df_test_valid = df_test.loc[valid_test_idx][["permno", "year", "month"]].copy()
+        # Save raw forecasts before winsorisation so any threshold can be applied downstream.
+        df_test_valid["expected_ret_raw_ols"]   = y_pred_ols.astype(np.float32)
+        df_test_valid["expected_ret_raw_huber"] = y_pred_huber.astype(np.float32)
         df_test_valid["expected_ret_ols"]   = y_pred_ols.astype(np.float32)
         df_test_valid["expected_ret_huber"] = y_pred_huber.astype(np.float32)
 
-        # Fix 4: winsorise cross-sectional forecasts at 1 % per tail per month
+        # Winsorise cross-sectional forecasts at forecast_winsor_pct per tail per month.
         winsor_pct = cfg.get("forecast_winsor_pct", 0.01)
         df_test_valid["expected_ret_ols"]   = _winsorize_forecasts(
             df_test_valid, "expected_ret_ols",   winsor_pct,
@@ -1687,6 +1730,14 @@ def run_elastic_net(
         all_expected_huber.append(
             df_test_valid[["permno", "year", "month", "expected_ret_huber"]]
             .rename(columns={"expected_ret_huber": "expected_ret"})
+        )
+        all_expected_raw_ols.append(
+            df_test_valid[["permno", "year", "month", "expected_ret_raw_ols"]]
+            .rename(columns={"expected_ret_raw_ols": "expected_ret"})
+        )
+        all_expected_raw_huber.append(
+            df_test_valid[["permno", "year", "month", "expected_ret_raw_huber"]]
+            .rename(columns={"expected_ret_raw_huber": "expected_ret"})
         )
 
         # ── Monthly OOS R² breakdown ───────────────────────────────────────
@@ -1809,6 +1860,7 @@ def run_elastic_net(
             "best_l1_ols":       best_l1_ols,
             "best_alpha_huber":  best_alpha_hub,
             "best_l1_huber":     best_l1_hub,
+            "best_epsilon_huber": best_epsilon_hub,
             "n_nonzero_ols":     int(np.sum(ols_coefs != 0)),
             "n_nonzero_huber":   n_nz_hub,
             "rolling_val_r2_ols":   rolling_val_r2_ols,
@@ -1833,12 +1885,17 @@ def run_elastic_net(
 
     results = {}
 
+    _empty_ret = pd.DataFrame(columns=["permno","year","month","expected_ret"])
     if all_expected_ols:
-        results["expected_returns_ols"]   = pd.concat(all_expected_ols,   ignore_index=True)
-        results["expected_returns_huber"] = pd.concat(all_expected_huber, ignore_index=True)
+        results["expected_returns_ols"]       = pd.concat(all_expected_ols,       ignore_index=True)
+        results["expected_returns_huber"]     = pd.concat(all_expected_huber,     ignore_index=True)
+        results["expected_returns_raw_ols"]   = pd.concat(all_expected_raw_ols,   ignore_index=True)
+        results["expected_returns_raw_huber"] = pd.concat(all_expected_raw_huber, ignore_index=True)
     else:
-        results["expected_returns_ols"]   = pd.DataFrame(columns=["permno","year","month","expected_ret"])
-        results["expected_returns_huber"] = pd.DataFrame(columns=["permno","year","month","expected_ret"])
+        results["expected_returns_ols"]       = _empty_ret.copy()
+        results["expected_returns_huber"]     = _empty_ret.copy()
+        results["expected_returns_raw_ols"]   = _empty_ret.copy()
+        results["expected_returns_raw_huber"] = _empty_ret.copy()
 
     results["oos_r2"]        = pd.DataFrame(all_oos_r2)
     results["metadata"]      = pd.DataFrame(all_metadata)
@@ -1854,6 +1911,13 @@ def run_elastic_net(
         pd.concat(all_val_surfaces, ignore_index=True)
         if all_val_surfaces else pd.DataFrame()
     )
+    if all_metadata:
+        _meta = results["metadata"]
+        results["tuned_params"] = _meta[[
+            "reest_year",
+            "best_alpha_ols", "best_l1_ols",
+            "best_alpha_huber", "best_l1_huber", "best_epsilon_huber",
+        ]].copy()
     # Diagnostic 1: forecast stability (rank-IC, cross-sectional std)
     results["forecast_stability"] = pd.DataFrame(all_forecast_stability)
     if all_forecast_stability:
