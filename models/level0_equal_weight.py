@@ -82,7 +82,11 @@ if __name__ == "__main__":
     # rebalancing date so that performance differences reflect model
     # skill, not differences in the investable stock set.
     # --------------------------------------------------------
-    data_path = "data_clean/master_panel.csv"
+    try:
+        from portfolio.config import PANEL_PATH
+    except ImportError:
+        PANEL_PATH = "data_clean/master_panel.csv"
+    data_path = PANEL_PATH
     print(f"\nLoading master panel from: {data_path}")
     master = pd.read_csv(data_path, low_memory=False)
     master.columns = [c.strip().lower() for c in master.columns]

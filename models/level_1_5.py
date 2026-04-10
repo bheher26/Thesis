@@ -425,7 +425,11 @@ if __name__ == "__main__":
     print("LEVEL 1.5: FF5 + MACRO-CONDITIONED PREMIA — 1980 to 2024")
     print("=" * 60)
 
-    data_path = "data_clean/master_panel.csv"
+    try:
+        from portfolio.config import PANEL_PATH
+    except ImportError:
+        PANEL_PATH = "data_clean/master_panel.csv"
+    data_path = PANEL_PATH
     print(f"\nLoading master panel from: {data_path}")
     master = pd.read_csv(data_path, low_memory=False)
     master.columns = [c.strip().lower() for c in master.columns]

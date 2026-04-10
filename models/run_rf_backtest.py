@@ -28,14 +28,17 @@ from portfolio.optimizer import run_backtest
 from portfolio.metrics import evaluate_results, print_benchmark_comparison
 
 # ── Config ────────────────────────────────────────────────────────────────────
-MASTER_PATH = "data_clean/master_panel.csv"
+try:
+    from portfolio.config import PANEL_PATH as MASTER_PATH  # type: ignore
+except ImportError:
+    MASTER_PATH = "data_clean/master_panel.csv"
 OUTPUT_DIR  = "data_clean/random_forest"
 START_YEAR, START_MONTH = 2005, 1
 END_YEAR,   END_MONTH   = 2024, 12
 RISK_AVERSION = 1.0
 WINDOW        = 60
 COST_BPS      = 10
-MAX_TURNOVER  = 0.35   # 35% one-way monthly turnover cap
+MAX_TURNOVER  = 0.20   # 20% one-way monthly turnover cap
 
 # ── Load master panel ─────────────────────────────────────────────────────────
 print(f"\nLoading master panel from {MASTER_PATH} …")

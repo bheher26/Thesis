@@ -29,7 +29,10 @@ from portfolio.optimizer import run_backtest
 from portfolio.metrics import evaluate_results, print_benchmark_comparison
 
 # ── Config ────────────────────────────────────────────────────────────────────
-MASTER_PATH = "data_clean/master_panel.csv"
+try:
+    from portfolio.config import PANEL_PATH as MASTER_PATH  # type: ignore
+except ImportError:
+    MASTER_PATH = "data_clean/master_panel.csv"
 OUTPUT_DIR  = "data_clean/elastic_net"
 START_YEAR, START_MONTH = 2005, 1
 END_YEAR,   END_MONTH   = 2024, 12

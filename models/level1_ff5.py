@@ -273,7 +273,11 @@ if __name__ == "__main__":
     # Universe is defined identically across all models: stocks that
     # pass build_returns_matrix's 20% missingness filter on master_panel.
     # --------------------------------------------------------
-    data_path = "data_clean/master_panel.csv"
+    try:
+        from portfolio.config import PANEL_PATH
+    except ImportError:
+        PANEL_PATH = "data_clean/master_panel.csv"
+    data_path = PANEL_PATH
     print(f"\nLoading master panel from: {data_path}")
     master = pd.read_csv(data_path, low_memory=False)
     master.columns = [c.strip().lower() for c in master.columns]

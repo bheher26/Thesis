@@ -53,7 +53,7 @@ warnings.filterwarnings("ignore", category=UserWarning)
 # ============================================================
 
 FIRM_CHARACTERISTICS: List[str] = [
-    "market_cap", "ret", "ret_adjusted", "illiquidity", "reversal_st",
+    "market_cap", "illiquidity", "reversal_st",
     "momentum", "reversal_lt", "be", "bm", "noa", "gp", "roa", "capinv",
     "leverage", "asset_growth", "accruals", "mom1m", "mom6m", "mom12m",
     "mom36m", "chmom", "indmom", "maxret", "pricedelay", "mvel1", "dolvol",
@@ -99,7 +99,7 @@ DEFAULT_CONFIG: Dict = {
     # covers alpha=0.001 (near-unpenalised) through alpha=10 (strong shrinkage).
     # KNS: L2-only ridge already works well; the combined approach needs less
     # alpha range than raw-feature elastic net.
-    "alpha_grid":         list(np.logspace(-3, 1, 20)),
+    "alpha_grid":         list(np.logspace(-4, 1, 20)),  # extended lower bound to 0.0001
 
     # l1_ratio grid: capped at 0.5.  KNS (p.279) is explicit that near-LASSO
     # performs poorly when regressors are correlated.  Even after PCA the
@@ -127,7 +127,7 @@ DEFAULT_CONFIG: Dict = {
     "min_stocks_per_month": 50,
 
     # ── Paths ────────────────────────────────────────────────────────────
-    "data_path":  "data_clean/master_panel.csv",
+    "data_path":  "data_clean/master_panel.csv",   # overridden below from config
     "macro_path": "data_raw/macro_predictors.csv",
     "output_dir": "data_clean/elastic_net",
     "cache_dir":  "data_clean/elastic_net/cache",
@@ -194,6 +194,14 @@ DEFAULT_CONFIG: Dict = {
     # None → disabled (raw features passed through, original behaviour).
     "pca_n_components":    0.95,
 }
+
+# Override data_path from portfolio/config.py if build_master has been run.
+# Falls back to the hardcoded default above if the config file doesn't exist.
+try:
+    from portfolio.config import PANEL_PATH as _PANEL_PATH  # type: ignore
+    DEFAULT_CONFIG["data_path"] = _PANEL_PATH
+except ImportError:
+    pass
 
 # ============================================================
 # Logging
@@ -1336,11 +1344,14 @@ def fit_huber_model_sgd(
         max_iter=config.get("huber_max_iter", 2000),
         tol=config.get("huber_tol", 1e-4),
         random_state=42,
-        learning_rate="optimal",
+        # "adaptive" with fixed eta0 is more stable than "optimal" (which uses
+        # 1/(alpha*t) step sizes — problematic when alpha is very small on large N).
+        learning_rate="adaptive",
+        eta0=0.01,
         fit_intercept=True,
-        n_iter_no_change=10,
-        validation_fraction=0.05,
-        early_stopping=True,
+        # Disable early stopping in the final fit: on 170k+ rows the held-out
+        # validation fraction has different statistics and causes premature stopping.
+        early_stopping=False,
     )
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
@@ -1661,7 +1672,10 @@ def run_elastic_net(
         # Fix 5: reuse OLS hyperparameters for Huber (same α, l1_ratio);
         # only sweep epsilon via a fast SGD sweep — eliminates 400-combo FISTA tuning.
         best_alpha_hub = best_alpha_ols
-        best_l1_hub    = best_l1_ols
+        # Floor l1_ratio at 0.1 for Huber SGD: pure ridge (l1_ratio=0) with
+        # learning_rate="optimal" produces step sizes 1/(alpha*t) that are
+        # too large on 170k+ rows, causing SGD divergence.
+        best_l1_hub    = max(best_l1_ols, 0.1)
         logger.info("  Selecting Huber epsilon (fast SGD sweep, val %d–%d) …", val_start_year, val_end_year)
         t0 = time.time()
         best_epsilon_hub = _select_epsilon_fast(
@@ -1864,14 +1878,10 @@ def run_elastic_net(
         # ── Diagnostic 1: Forecast stability (rank-IC / cross-sectional std) ─
         # rank_IC: Spearman correlation of this year's forecasts with last year's
         # on the common permno set.  Low rank_IC → high turnover.
-        curr_ols_s   = pd.Series(
-            df_test_valid["expected_ret_ols"].values,
-            index=df_test_valid["permno"].values,
-        )
-        curr_huber_s = pd.Series(
-            df_test_valid["expected_ret_huber"].values,
-            index=df_test_valid["permno"].values,
-        )
+        # Aggregate to one forecast per permno (mean across months) so that
+        # the rank-IC comparison between years has unique indices on both sides.
+        curr_ols_s   = df_test_valid.groupby("permno")["expected_ret_ols"].mean()
+        curr_huber_s = df_test_valid.groupby("permno")["expected_ret_huber"].mean()
         rank_ic_ols   = np.nan
         rank_ic_huber = np.nan
         if prev_forecasts_ols is not None:
