@@ -703,6 +703,7 @@ if __name__ == "__main__":
     print(f"  Annualised gross Sharpe  : {summary['annualized_gross_sharpe']:.3f}")
     sortino = summary['annualized_sortino']
     print(f"  Annualised Sortino       : {sortino:.3f}" if sortino == sortino else "  Annualised Sortino       : nan")
+    print(f"  Annualised gross return  : {summary['annualized_gross_return']*100:.2f}%")
     print(f"  Annualised net return    : {summary['annualized_net_return']*100:.2f}%")
     print(f"  Annualised volatility    : {summary['annualized_volatility']*100:.2f}%")
     print(f"  Downside deviation (ann.): {summary['annualized_downside_deviation']:.4f}")

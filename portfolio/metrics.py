@@ -70,6 +70,9 @@ def evaluate_results(results_df, rf_series=None):
     cum_net = (1 + df["net_return"]).prod()
     annualized_net_return = cum_net ** (12 / T) - 1
 
+    cum_gross = (1 + df["gross_return"]).prod()
+    annualized_gross_return = cum_gross ** (12 / T) - 1
+
     # --------------------------------------------------------
     # Annualised volatility — std of monthly net returns * sqrt(12)
     # --------------------------------------------------------
@@ -121,6 +124,7 @@ def evaluate_results(results_df, rf_series=None):
     summary = {
         "annualized_net_sharpe":        round(annualized_net_sharpe,   4),
         "annualized_gross_sharpe":      round(annualized_gross_sharpe, 4),
+        "annualized_gross_return":      round(annualized_gross_return, 4),
         "annualized_net_return":        round(annualized_net_return,   4),
         "annualized_volatility":        round(annualized_volatility,   4),
         "max_drawdown":                 round(max_drawdown,            4),
@@ -220,6 +224,7 @@ def print_benchmark_comparison(current_label, current_summary,
         ("Net Sharpe (ann.)",    "annualized_net_sharpe",   "{:.3f}", ""),
         ("Gross Sharpe (ann.)",  "annualized_gross_sharpe", "{:.3f}", ""),
         ("Sortino (ann.)",       "annualized_sortino",      "{:.3f}", ""),
+        ("Gross return (ann.)",  "annualized_gross_return", "{:.2f}", "%"),
         ("Net return (ann.)",    "annualized_net_return",   "{:.2f}", "%"),
         ("Volatility (ann.)",    "annualized_volatility",   "{:.2f}", "%"),
         ("Downside dev. (ann.)", "annualized_downside_deviation", "{:.4f}", ""),
@@ -268,6 +273,7 @@ if __name__ == "__main__":
     print(f"  Annualised net Sharpe    : {summary['annualized_net_sharpe']:.3f}")
     print(f"  Annualised gross Sharpe  : {summary['annualized_gross_sharpe']:.3f}")
     print(f"  Annualised Sortino       : {summary['annualized_sortino']:.3f}")
+    print(f"  Annualised gross return  : {summary['annualized_gross_return']*100:.2f}%")
     print(f"  Annualised net return    : {summary['annualized_net_return']*100:.2f}%")
     print(f"  Annualised volatility    : {summary['annualized_volatility']*100:.2f}%")
     print(f"  Downside deviation (ann.): {summary['annualized_downside_deviation']:.4f}")

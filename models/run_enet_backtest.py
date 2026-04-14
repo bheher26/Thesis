@@ -82,6 +82,7 @@ for loss in ("ols", "huber"):
     print(f"{'='*60}")
     print(f"  Annualised net Sharpe    : {summary['annualized_net_sharpe']:.3f}")
     print(f"  Annualised gross Sharpe  : {summary['annualized_gross_sharpe']:.3f}")
+    print(f"  Annualised gross return  : {summary['annualized_gross_return']*100:.2f}%")
     print(f"  Annualised net return    : {summary['annualized_net_return']*100:.2f}%")
     print(f"  Annualised volatility    : {summary['annualized_volatility']*100:.2f}%")
     print(f"  Max drawdown             : {summary['max_drawdown']*100:.2f}%")
