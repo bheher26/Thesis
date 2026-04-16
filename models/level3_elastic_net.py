@@ -33,14 +33,14 @@ import pickle
 import time
 import warnings
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import pandas as pd
 from joblib import Parallel, delayed
 from scipy.stats import rankdata, spearmanr
 from sklearn.decomposition import PCA
-from sklearn.linear_model import ElasticNet, SGDRegressor
+from sklearn.linear_model import ElasticNet, Ridge, SGDRegressor
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.preprocessing import StandardScaler
 from tqdm import tqdm
@@ -93,20 +93,18 @@ DEFAULT_CONFIG: Dict = {
     # ── Hyperparameter grid ──────────────────────────────────────────────
     # alpha  = regularisation strength (λ in the paper)
     # l1_ratio = weight on L1 vs L2 (sklearn convention: 1 = LASSO, 0 = ridge)
-    # Alpha grid: logspace -3→1 (20 values).  With PCA pre-projection the
-    # effective number of features is ~50-100 orthogonal PCs (vs 920 correlated
-    # raw features), so the per-feature penalty scales differently. logspace(-3,1)
-    # covers alpha=0.001 (near-unpenalised) through alpha=10 (strong shrinkage).
-    # KNS: L2-only ridge already works well; the combined approach needs less
-    # alpha range than raw-feature elastic net.
-    "alpha_grid":         list(np.logspace(-4, 1, 20)),  # extended lower bound to 0.0001
+    #
+    # Alpha grid: logspace(-5, 1, 20) — 20 values from 1e-5 to 10.
+    # The full run (0.95 variance PCA → 553 PCs) hit alpha=1e-4 at the lower
+    # bound.  With 50 PCs the typical ridge optimum shifts; extending to 1e-5
+    # prevents boundary hits.  The Ridge bypass (l1_ratio < 0.05) makes the
+    # small-alpha cases fast — no coordinate-descent penalty.
+    "alpha_grid":         list(np.logspace(-5, 1, 20)),
 
-    # l1_ratio grid: capped at 0.5.  KNS (p.279) is explicit that near-LASSO
-    # performs poorly when regressors are correlated.  Even after PCA the
-    # PC scores share information from correlated raw characteristics (same
-    # macro variables interact with all chars).  Removing values > 0.5 prevents
-    # the model from collapsing to a near-empty solution.  Pure ridge (0.0) is
-    # included as the KNS-motivated anchor.
+    # l1_ratio grid: 0.0 routes to Ridge (fast Cholesky); 0.01-0.5 are
+    # elastic net combinations.  KNS (p.279): near-LASSO fails on correlated
+    # features; cap at 0.5.  0.0 is the KNS-motivated ridge anchor and is now
+    # cheap (Ridge solver, not ElasticNet coordinate descent).
     "l1_ratio_grid":      [0.0, 0.01, 0.1, 0.3, 0.5],
     "huber_epsilon":      1.35,       # Huber threshold default (overridden by tuning)
     "huber_epsilon_grid": [0.5, 0.7, 0.9, 1.35],
@@ -189,10 +187,14 @@ DEFAULT_CONFIG: Dict = {
     # the most informative PCs rather than arbitrarily picking one member of
     # each correlated group.
     #
-    # pca_n_components: float → fraction of variance explained (0.95 retains
-    # ~50-100 PCs from 920 raw features); int → exact number of components;
-    # None → disabled (raw features passed through, original behaviour).
-    "pca_n_components":    0.95,
+    # pca_n_components: int → exact number of components to retain;
+    # float → fraction of variance explained; None → disabled.
+    # Set to 50: GKX has ~920 raw features; KNS retains 50-100 leading PCs.
+    # 0.95 (fraction) retained 553 PCs from 862 features — 10× too many,
+    # causing 94-min OLS fits (coordinate descent on pure ridge with 553 dims).
+    # 50 PCs capture the dominant cross-sectional variation and reduce fitting
+    # time from ~190 min/year to ~5 min/year.
+    "pca_n_components":    50,
 }
 
 # Override data_path from portfolio/config.py if build_master has been run.
@@ -816,25 +818,32 @@ def _cv_score_ols(
     """
     scores    = []
     warm_coef = None
+    # When l1_ratio < 0.05 the problem is effectively pure ridge.  sklearn's
+    # ElasticNet uses coordinate descent which converges catastrophically slowly
+    # for near-pure L2 penalties (coordinates barely move each cycle).
+    # Ridge uses Cholesky / LSQR and solves the same problem in milliseconds.
+    use_ridge = l1_ratio < 0.05
     for X_tr_s, y_tr, X_vl_s, y_vl in scaled_folds:
-        # Each alpha/l1_ratio gets its own ElasticNet instance; warm-start
-        # across folds within one combo (not across combos).
-        model = ElasticNet(
-            alpha=alpha, l1_ratio=l1_ratio,
-            fit_intercept=True,
-            max_iter=max_iter, tol=tol,
-            warm_start=True, selection="cyclic",
-        )
-        if warm_coef is not None:
-            try:
-                model.coef_      = warm_coef["coef"]
-                model.intercept_ = warm_coef["intercept"]
-            except Exception:
-                pass
+        if use_ridge:
+            model = Ridge(alpha=alpha, fit_intercept=True, solver="auto")
+        else:
+            model = ElasticNet(
+                alpha=alpha, l1_ratio=l1_ratio,
+                fit_intercept=True,
+                max_iter=max_iter, tol=tol,
+                warm_start=True, selection="cyclic",
+            )
+            if warm_coef is not None:
+                try:
+                    model.coef_      = warm_coef["coef"]
+                    model.intercept_ = warm_coef["intercept"]
+                except Exception:
+                    pass
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             model.fit(X_tr_s, y_tr)
-        warm_coef = {"coef": model.coef_.copy(), "intercept": model.intercept_}
+        if not use_ridge:
+            warm_coef = {"coef": model.coef_.copy(), "intercept": model.intercept_}
         scores.append(compute_gkx_r2(y_vl, model.predict(X_vl_s)))
     return float(np.mean(scores)) if scores else -np.inf
 
@@ -1229,9 +1238,9 @@ def fit_ols_model(
     alpha: float,
     l1_ratio: float,
     config: Dict,
-) -> Tuple[ElasticNet, StandardScaler]:
+) -> Tuple[Union[ElasticNet, Ridge], StandardScaler]:
     """
-    Fit final OLS elastic net on the full training window.
+    Fit final OLS elastic net (or Ridge) on the full training window.
 
     Standardises X before fitting so that the elastic net penalty treats all
     features on equal footing — consistent with the Huber path which also
@@ -1244,14 +1253,20 @@ def fit_ols_model(
     """
     scaler = StandardScaler()
     X_s = scaler.fit_transform(X_train.astype(np.float64))
-    model = ElasticNet(
-        alpha=alpha, l1_ratio=l1_ratio,
-        fit_intercept=True,
-        max_iter=config["max_iter"],
-        tol=config["tol"],
-        warm_start=True,
-        selection="cyclic",
-    )
+    # Pure-ridge bypass: ElasticNet coordinate descent converges extremely slowly
+    # when l1_ratio ≈ 0 (coordinates barely move each cycle).  Ridge uses
+    # Cholesky / LSQR and is orders of magnitude faster for the same problem.
+    if l1_ratio < 0.05:
+        model = Ridge(alpha=alpha, fit_intercept=True, solver="auto")
+    else:
+        model = ElasticNet(
+            alpha=alpha, l1_ratio=l1_ratio,
+            fit_intercept=True,
+            max_iter=config["max_iter"],
+            tol=config["tol"],
+            warm_start=True,
+            selection="cyclic",
+        )
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         model.fit(X_s, y_train.astype(np.float64))
@@ -1401,7 +1416,7 @@ def _winsorize_forecasts(
 # ============================================================
 
 def compute_variable_importance(
-    model_ols: ElasticNet,
+    model_ols: Union[ElasticNet, Ridge],
     scaler_ols: StandardScaler,
     model_huber: "SGDRegressor",
     scaler_huber: StandardScaler,
@@ -1433,8 +1448,8 @@ def compute_variable_importance(
     y_base_huber  = model_huber.predict(X_val_hub_s)
     base_r2_huber = compute_gkx_r2(y_val, y_base_huber)
 
-    ols_coefs   = model_ols.coef_
-    huber_coefs = model_huber.coef_  # SGDRegressor.coef_ excludes intercept
+    ols_coefs   = np.asarray(model_ols.coef_).ravel()   # Ridge can return (1,p) shape
+    huber_coefs = np.asarray(model_huber.coef_).ravel()  # SGDRegressor excludes intercept
 
     nonzero_ols   = np.where(np.abs(ols_coefs)   > 1e-10)[0]
     nonzero_huber = np.where(np.abs(huber_coefs) > 1e-10)[0]
@@ -1468,6 +1483,8 @@ def compute_variable_importance(
             "vi_huber":   float(vi_huber),
         })
 
+    if not rows:
+        return pd.DataFrame(columns=["feature", "coef_ols", "coef_huber", "vi_ols", "vi_huber"])
     return pd.DataFrame(rows).sort_values("vi_ols", ascending=False)
 
 
@@ -1785,7 +1802,7 @@ def run_elastic_net(
             best_alpha_ols, best_l1_ols, cfg,
         )
         logger.info("  OLS fit done: %d non-zero PCs  (%.1fs)",
-                    int(np.sum(model_ols.coef_ != 0)), time.time() - t0)
+                    int(np.sum(np.abs(np.asarray(model_ols.coef_).ravel()) > 1e-10)), time.time() - t0)
 
         # Fix 6: replace FISTA final fit with SGDRegressor (~30–60s vs 20–40 min)
         logger.info("  Fitting final Huber model [SGD]  (α=%.5f, l1_ratio=%.2f, ε=%.2f) …",
@@ -1919,8 +1936,8 @@ def run_elastic_net(
         prev_forecasts_huber = curr_huber_s
 
         # ── Feature selection diagnostics ──────────────────────────────────
-        ols_coefs  = model_ols.coef_
-        hub_coefs  = model_huber.coef_  # SGDRegressor.coef_ excludes intercept
+        ols_coefs  = np.asarray(model_ols.coef_).ravel()   # Ridge can return (1,p) shape
+        hub_coefs  = np.asarray(model_huber.coef_).ravel()  # SGDRegressor excludes intercept
         ols_nz_idx = np.where(np.abs(ols_coefs) > 1e-10)[0]
         hub_nz_idx = np.where(np.abs(hub_coefs) > 1e-10)[0]
 

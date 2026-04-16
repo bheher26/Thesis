@@ -13,7 +13,7 @@ print("Running from directory:", os.getcwd())
 # ============================================================
 
 def optimize_portfolio(expected_returns, covariance, risk_aversion=1.0,
-                       max_weight=0.05):
+                       max_weight=0.10):
     """
     Mean-variance portfolio optimization (long-only, fully invested).
 
@@ -36,11 +36,9 @@ def optimize_portfolio(expected_returns, covariance, risk_aversion=1.0,
         # !! variance more heavily, scale down to chase return.
     max_weight : float
         Maximum weight allowed in any single asset.
-        # !! TUNING PARAMETER: max_weight=0.05 (5%) — prevents the solver
-        # !! from producing degenerate, highly-concentrated portfolios that
-        # !! arise when a few stocks dominate the expected-return signal.
-        # !! With ~400 assets a 5% cap still allows meaningful tilts while
-        # !! ensuring at least 20 stocks are held at all times.
+        # !! TUNING PARAMETER: max_weight=0.10 (10%) — moderate concentration
+        # !! cap; ensures at least 10 stocks are held at all times while
+        # !! allowing meaningful tilts toward high-signal names.
 
     Returns
     -------

@@ -32,41 +32,148 @@ UNIVERSE_PATH       = "data_clean/universe_monthly.csv"
 OUTPUT_PATH         = "data_clean/osap_signals_expanded.csv"
 CHUNK_SIZE          = 200_000   # rows per chunk (~200k rows ≈ manageable RAM)
 
-# Signals to RETAIN — ≥80% non-null in existing top-500 master_panel
-# (sourced from osap_signal_coverage.csv in the April 2026 audit)
-SIGNALS_TO_KEEP = [
-    # Momentum
-    "mom1m", "mom6m", "mom12m", "mom36m", "indmom",
+# Raw OSAP column names to RETAIN from osap_signals_raw.csv.
+# These are the OSAP-native names — NOT our model's naming convention.
+# The COLUMN_RENAME_MAP below translates them to model names after loading.
+#
+# Root cause of the v2 characteristic gap (Apr 2026):
+# The original list used model names (mom1m, idiovol, baspread …) instead of
+# raw OSAP names (streversal, idiovol3f, bidaskspread …). resolve_keep_cols()
+# does case-insensitive matching, which can't bridge a name mismatch, so 36
+# signals were silently skipped and osap_signals_expanded.csv ended up with
+# only 19 signals instead of the intended ~55.
+SIGNALS_TO_KEEP_RAW = [
+    # Momentum (raw OSAP names)
+    "streversal",        # → mom1m  (1-month return)
+    "mom6m",             # → mom6m  (exact match)
+    "mom12m",            # → mom12m (exact match)
+    "lrreversal",        # → mom36m (long-run reversal)
+    "indmom",            # → indmom (exact match)
+    "momrev",            # → chmom  (change in momentum)
     # Liquidity / trading
-    "ill", "dolvol", "zerotrade", "baspread",
+    "illiquidity",       # → ill    (Amihud illiquidity — also used directly)
+    "dolvol",            # → dolvol (exact match)
+    "zerotrade1m",       # → zerotrade
+    "bidaskspread",      # → baspread
+    "sharevol",          # → turn   (share turnover)
+    "std_turn",          # kept as std_turn (already excluded below due to coverage)
+    "pricedelayrsq",     # → pricedelay
     # Volatility
-    "retvol", "idiovol", "maxret", "beta",
+    "realizedvol",       # → retvol
+    "idiovol3f",         # → idiovol (3-factor idiosyncratic vol)
+    "maxret",            # → maxret (exact match)
+    "beta",              # → beta   (exact match)
     # Valuation
-    "ep", "cfp", "sp", "dy", "cashpr", "mvel1",
+    "ep",                # → ep     (exact match)
+    "cfp",               # → cfp    (exact match)
+    "sp",                # → sp     (exact match)
+    "divyieldst",        # → dy
+    "cashprod",          # → cashpr
+    "size",              # → mvel1  (log market equity)
+    "bm",                # → bm     (exact match — though computed in build_master too)
     # Profitability
-    "roeq", "roaq", "gma", "chatoia",
+    "roe",               # → roeq
+    "roaq",              # → roaq   (exact match)
+    "cboperprof",        # → gma
+    "chassetturnover",   # → chatoia
+    "operprof",          # → operprof (exact match)
     # Investment / accruals
-    "agr", "grcapx", "grltnoa", "chinv",
+    "assetgrowth",       # → agr
+    "investment",        # → invest
+    "grcapx",            # → grcapx (exact match)
+    "grltnoa",           # → grltnoa (exact match)
+    "chinv",             # → chinv  (exact match)
     # Accruals / quality
-    "acc", "absacc", "pctacc", "stdcf",
-    # Other signals above 80% threshold
-    "lev", "cashpr", "convind", "hire", "age",
-    "cash", "cfp", "herf", "tb", "nincr", "rsup", "ear",
-    "chtx", "chcsho", "invest",
-    # Derived signals computed in build_master (not in OSAP raw, included for
-    # completeness so the filter doesn't accidentally drop them)
-    # betasq, std_dolvol, stdacc, sgr, bm_ia, cfp_ia, mve_ia, chpmia are
-    # computed in build_master.py from other columns — not present in OSAP raw.
+    "totalaccruals",     # → acc
+    "abnormalaccruals",  # → absacc
+    "pctacc",            # → pctacc (exact match)
+    "varcf",             # → stdcf
+    # Other characteristics
+    "bookleverage",      # → lev
+    "convdebt",          # → convind
+    "hire",              # → hire   (exact match)
+    "firmage",           # → age
+    "cash",              # → cash   (exact match)
+    "herf",              # → herf   (exact match)
+    "tax",               # → tb
+    "numearnincrease",   # → nincr
+    "revenuesurprise",   # → rsup
+    "earningssurprise",  # → ear
+    "chtax",             # → chtx
+    "compequiss",        # → chcsho
+    "rds",               # → rd_sale
+    "realestate",        # → realestate (exact match)
+    "tang",              # → tang   (exact match)
+    "ms",                # → ms     (exact match)
+    "orgcap",            # → orgcap (exact match)
+    "ps",                # → ps     (exact match — low coverage but let model drop it)
+    "rd",                # → rd     (exact match)
+    "noa",               # → noa    (exact match)
+    "gp",                # → gp     (exact match)
+    "accruals",          # → accruals (exact match)
+    "sinalgo",           # → sin
+    "grsaletogrinv",     # → pchsale_pchinvt
+    "grsaletogroverhead",# → pchsale_pchxsga
+    # Exact-match signals already in expanded (retained)
+    "indmom", "maxret", "mom12m", "mom6m", "beta", "cash", "cfp", "chinv",
+    "dolvol", "ep", "grcapx", "grltnoa", "herf", "hire", "pctacc", "roaq", "sp",
 ]
+# Deduplicate while preserving order
+_seen: set = set()
+_deduped = []
+for _x in SIGNALS_TO_KEEP_RAW:
+    if _x not in _seen:
+        _seen.add(_x)
+        _deduped.append(_x)
+SIGNALS_TO_KEEP_RAW = _deduped
+del _seen, _deduped, _x
 
-# Signals to EXPLICITLY EXCLUDE — near-zero or zero coverage in audit
-SIGNALS_TO_DROP = [
-    "chmom",     # 3.1% non-null — effectively unusable
-    "turn",      # 16.1% non-null — severely sparse
+# Map raw OSAP column names → model characteristic names.
+# Only entries that differ need to be listed here.
+COLUMN_RENAME_MAP = {
+    "streversal":        "mom1m",
+    "lrreversal":        "mom36m",
+    "momrev":            "chmom",
+    "illiquidity":       "ill",
+    "zerotrade1m":       "zerotrade",
+    "bidaskspread":      "baspread",
+    "sharevol":          "turn",
+    "pricedelayrsq":     "pricedelay",
+    "realizedvol":       "retvol",
+    "idiovol3f":         "idiovol",
+    "divyieldst":        "dy",
+    "cashprod":          "cashpr",
+    "size":              "mvel1",
+    "roe":               "roeq",
+    "cboperprof":        "gma",
+    "chassetturnover":   "chatoia",
+    "assetgrowth":       "agr",
+    "investment":        "invest",
+    "totalaccruals":     "acc",
+    "abnormalaccruals":  "absacc",
+    "varcf":             "stdcf",
+    "bookleverage":      "lev",
+    "convdebt":          "convind",
+    "firmage":           "age",
+    "tax":               "tb",
+    "numearnincrease":   "nincr",
+    "revenuesurprise":   "rsup",
+    "earningssurprise":  "ear",
+    "chtax":             "chtx",
+    "compequiss":        "chcsho",
+    "rds":               "rd_sale",
+    "sinalgo":           "sin",
+    "grsaletogrinv":     "pchsale_pchinvt",
+    "grsaletogroverhead":"pchsale_pchxsga",
+}
+
+# Signals to EXPLICITLY EXCLUDE after loading — near-zero coverage in top-500 audit.
+# Note: chmom/momrev IS included above (3.1% non-null in top-500 universe but may
+# be higher in the broader v2 universe — let the model's char_missing_threshold drop
+# it if truly sparse). std_turn and rd_mve remain excluded.
+SIGNALS_TO_DROP_RAW = [
     "std_turn",  # 0.2%  non-null — completely unusable
-    "rd_mve",    # 0.0%  non-null — broken / zero coverage
-    "sin",       # 7.4%  non-null — very sparse
-    "ps",        # 4.2%  non-null — very sparse
+    # rd_mve has no OSAP equivalent — absent from raw file
 ]
 
 # Always include identifier columns
@@ -89,30 +196,30 @@ def load_universe(path: str) -> set:
 def resolve_keep_cols(all_cols: list) -> list:
     """
     Determine the final set of columns to keep from the raw OSAP file.
-    Uses case-insensitive matching because OSAP column names use mixed case.
-    Returns the actual column names as they appear in the file.
+    Uses case-insensitive matching against SIGNALS_TO_KEEP_RAW (raw OSAP names).
+    Returns the actual column names as they appear in the file (original case).
+    Columns are lowercased in the chunk loop immediately after usecols selection,
+    so the rename map can use lowercase keys safely.
     """
-    # Build a lower-case → original-case mapping
     lower_map = {c.lower(): c for c in all_cols}
 
-    keep = set(ID_COLS)
-    for sig in SIGNALS_TO_KEEP:
+    keep = set()
+    # Always include ID columns (case-insensitively)
+    for col in ID_COLS:
+        original = lower_map.get(col.lower(), col)
+        keep.add(original)
+
+    for sig in SIGNALS_TO_KEEP_RAW:
         original = lower_map.get(sig.lower())
         if original:
             keep.add(original)
-        # else: signal not in raw file (may be a derived signal) — skip silently
 
     # Remove explicitly excluded signals
-    for sig in SIGNALS_TO_DROP:
+    for sig in SIGNALS_TO_DROP_RAW:
         original = lower_map.get(sig.lower())
         if original and original in keep:
             keep.discard(original)
 
-    # Preserve ID cols even if something went wrong
-    for col in ID_COLS:
-        keep.add(col)
-
-    # Return in original column order
     return [c for c in all_cols if c in keep]
 
 
@@ -153,7 +260,7 @@ def build_osap_expanded(
     keep_cols = resolve_keep_cols(all_cols)
     print(f"  Columns to retain: {len(keep_cols)} (including {len(ID_COLS)} ID columns)")
     print(f"  Signal columns: {len(keep_cols) - len(ID_COLS)}")
-    print(f"  Dropped (low-coverage): {SIGNALS_TO_DROP}")
+    print(f"  Dropped (low-coverage): {SIGNALS_TO_DROP_RAW}")
 
     # ── Chunked read and filter ───────────────────────────────────────────────
     print(f"\nStep 3: Filtering raw file in chunks of {chunk_size:,} rows...")
@@ -174,6 +281,10 @@ def build_osap_expanded(
     for chunk in reader:
         chunk_num += 1
         rows_read += len(chunk)
+
+        # Lowercase all column names so the rename map (lowercase keys) works
+        # regardless of the mixed-case naming in the raw OSAP file.
+        chunk.columns = chunk.columns.str.lower()
 
         # Coerce ID columns to int for fast set lookup
         chunk["permno"] = pd.to_numeric(chunk["permno"], errors="coerce").astype("Int64")
@@ -216,6 +327,13 @@ def build_osap_expanded(
     after_dedup = len(result)
     if before_dedup > after_dedup:
         print(f"  Deduplication: dropped {before_dedup - after_dedup:,} duplicate (permno, yyyymm) rows")
+
+    # Rename raw OSAP column names → model characteristic names
+    rename_actual = {k: v for k, v in COLUMN_RENAME_MAP.items() if k in result.columns}
+    result = result.rename(columns=rename_actual)
+    if rename_actual:
+        print(f"  Renamed {len(rename_actual)} columns to model convention: "
+              f"{list(rename_actual.items())[:5]}{'…' if len(rename_actual) > 5 else ''}")
 
     # Add year and month for convenience
     result["year"]  = result["yyyymm"] // 100
