@@ -161,7 +161,7 @@ DEFAULT_CONFIG: Dict = {
     # Configurable to allow sensitivity testing. GKX use 12-month rolling
     # validation; 3-year window reduces HP selection noise at the cost of
     # slower adaptation to regime changes.
-    "val_window_years": 3,
+    "val_window_years": 5,
 }
 
 # Override data_path from portfolio/config.py if build_master has been run.
