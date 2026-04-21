@@ -10,7 +10,7 @@ Must be run from the project root:
     python models/run_enet_backtest.py
 
 Prerequisites:
-    - data_clean/master_panel.csv
+    - data_clean/master_panel_v2.csv  (path resolved via portfolio/config.py)
     - data_clean/elastic_net/expected_returns_enet_ols.parquet
     - data_clean/elastic_net/expected_returns_enet_huber.parquet
 
@@ -32,14 +32,14 @@ from portfolio.metrics import evaluate_results, print_benchmark_comparison
 try:
     from portfolio.config import PANEL_PATH as MASTER_PATH  # type: ignore
 except ImportError:
-    MASTER_PATH = "data_clean/master_panel.csv"
+    MASTER_PATH = "data_clean/master_panel_v2.csv"
 OUTPUT_DIR  = "data_clean/elastic_net"
 START_YEAR, START_MONTH = 2005, 1
 END_YEAR,   END_MONTH   = 2024, 12
 RISK_AVERSION = 1.0
 WINDOW        = 60
 COST_BPS      = 10
-MAX_TURNOVER  = 0.35   # 35% one-way monthly turnover cap
+MAX_TURNOVER  = None   # uncapped — frontier script owns cap sweep
 
 # ── Load master panel ─────────────────────────────────────────────────────────
 print(f"\nLoading master panel from {MASTER_PATH} …")
@@ -87,9 +87,8 @@ for loss in ("ols", "huber"):
     print(f"  Annualised volatility    : {summary['annualized_volatility']*100:.2f}%")
     print(f"  Max drawdown             : {summary['max_drawdown']*100:.2f}%")
     avg_to = results["turnover"].mean() * 100
-    pct_capped = (results["turnover"] <= MAX_TURNOVER + 0.001).mean() * 100
-    print(f"  Avg monthly turnover     : {avg_to:.1f}%  (cap={MAX_TURNOVER*100:.0f}%)")
-    print(f"  Months at/below cap      : {pct_capped:.0f}%")
+    cap_str = f"{MAX_TURNOVER*100:.0f}%" if MAX_TURNOVER is not None else "none"
+    print(f"  Avg monthly turnover     : {avg_to:.1f}%  (cap={cap_str})")
     print(f"  Avg monthly cost         : {summary['avg_monthly_cost_bps']:.2f} bps")
     print(f"{'='*60}")
 

@@ -125,7 +125,7 @@ DEFAULT_CONFIG: Dict = {
     "min_stocks_per_month": 50,
 
     # ── Paths ────────────────────────────────────────────────────────────
-    "data_path":  "data_clean/master_panel.csv",   # overridden below from config
+    "data_path":  "data_clean/master_panel_v2.csv",  # overridden below from config
     "macro_path": "data_raw/macro_predictors.csv",
     "output_dir": "data_clean/elastic_net",
     "cache_dir":  "data_clean/elastic_net/cache",
