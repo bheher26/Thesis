@@ -26,7 +26,7 @@ from portfolio.metrics import evaluate_results
 
 MODELS = [
     ("level0",   "data_clean/level0_results.csv",        "Level 0",   "1/N Equal-Weight"),
-    ("level1",   "data_clean/level1_results.csv",        "Level 1",   "FF5 Static"),
+    ("level1",   "data_clean/level1_results.csv",         "Level 1",   "FF5 Static"),
     ("level1_5", "data_clean/level_1_5_results.csv",     "Level 1.5", "FF5 + Macro Ridge"),
     ("level2",   "data_clean/level2_results.csv",        "Level 2",   "VAR-FF5"),
     ("level3o",  "data_clean/level3_ols_results.csv",    "Level 3a",  "Enet OLS"),

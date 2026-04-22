@@ -98,14 +98,15 @@ DEFAULT_CONFIG: Dict = {
     # introducing any overfitting risk. The grid retains 300 as the lower bound
     # for speed in early expanding window years where training data is limited.
     "n_estimators_grid": [300, 500, 1000],
-    # max_depth restricted to [1, 2]: test runs at depth 3 continue to show
-    # depth_ceiling_pct=1.0 and depth_std=0.0 after min_samples_leaf was raised
-    # to [500, 1000, 2000], confirming that depth=3 saturates universally in
-    # this feature space and sample size regime just as depth=4 did. The grid
-    # search was selecting depth=3 on validation noise rather than genuine
-    # signal. Depth=1 (stumps) is retained as a lower bound; depth=2 is the
-    # expected operating point consistent with GKX (2020).
-    "max_depth_grid":    [1, 2],
+    # max_depth [1, 2, 3]: depth=3 reinstated after backtest showed depth=2
+    # produces excessive month-to-month rank instability (turnover hitting 20%
+    # cap every month, net Sharpe 0.46 vs 0.65 for 1/N). At depth=2 the forest
+    # generates only 4 leaf nodes per tree — insufficient to produce stable
+    # cross-sectional rank orderings across 1,000+ firms month-to-month even
+    # though annual OOS R² is reasonable. Depth=3 saturates (depth_ceiling_pct
+    # =1.0) but produces stable enough rankings for portfolio construction.
+    # The saturation is accepted as a known property of this architecture.
+    "max_depth_grid":    [1, 2, 3],
     "max_features_grid": ["sqrt", 0.1, 0.3, 1/3],  # 1/3 ≈ P/3 per GKX default
     # min_samples_leaf fixed at 1000: grid search over [500, 1000, 2000] showed
     # 500 was never competitively selected and selection between 1000 and 2000
@@ -973,6 +974,7 @@ def _load_rf_forecasts(output_dir: str) -> pd.DataFrame:
 
 def make_rf_expected_returns_fn(
     output_dir: str = DEFAULT_CONFIG["output_dir"],
+    smoothing_months: int = 3,
 ) -> Callable:
     """
     Return an expected_returns_fn adapter for use with run_backtest().
@@ -1023,15 +1025,38 @@ def make_rf_expected_returns_fn(
              NaN for stocks not covered by the RF forecast.
         """
         forecasts = _load_rf_forecasts(output_dir)
-        month_slice = forecasts[
-            (forecasts["year"] == year) & (forecasts["month"] == month)
-        ]
-        month_slice = pd.DataFrame(month_slice).drop_duplicates(subset=["permno"])
-        month_fc = month_slice.set_index("permno")["expected_ret"]
-        # Cross-sectionally re-rank to [-1, 1] so the optimizer sees a consistent
-        # signal scale regardless of RF prediction compression (tree averaging
-        # shrinks raw outputs toward zero, weakening portfolio tilts).
-        month_fc = _rank_series_pm1(month_fc)
+
+        # Build a (year, month) sequence for the trailing smoothing_months
+        # windows ending at (year, month), then average the cross-sectionally
+        # ranked forecasts across those months. Averaging ranks rather than raw
+        # predictions ensures each month contributes equally regardless of
+        # RF output scale variation. This dampens month-to-month rank noise
+        # from shallow trees without introducing forward-looking information.
+        def _prior_months(y: int, m: int, n: int):
+            months = []
+            for _ in range(n):
+                months.append((y, m))
+                m -= 1
+                if m == 0:
+                    m = 12
+                    y -= 1
+            return months
+
+        window_months = _prior_months(year, month, smoothing_months)
+        ranked_slices = []
+        for wy, wm in window_months:
+            sl = forecasts[(forecasts["year"] == wy) & (forecasts["month"] == wm)]
+            sl = pd.DataFrame(sl).drop_duplicates(subset=["permno"])
+            if sl.empty:
+                continue
+            fc = sl.set_index("permno")["expected_ret"]
+            ranked_slices.append(_rank_series_pm1(fc))
+
+        if ranked_slices:
+            month_fc = pd.concat(ranked_slices, axis=1).mean(axis=1)
+        else:
+            month_fc = pd.Series(dtype=float)
+
         mu = month_fc.reindex(ret_matrix.columns)
         n_valid = mu.notna().sum()
         n_total = len(mu)

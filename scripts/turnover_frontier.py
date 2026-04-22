@@ -82,10 +82,6 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 #   fallback_csv: path to pre-computed results CSV (used when fn_factory
 #                 is None or fails); only natural turnover point is added.
 
-def _enet_ols_fn():
-    from models.level3_elastic_net import make_enet_expected_returns_fn
-    return make_enet_expected_returns_fn(loss="ols")
-
 def _enet_huber_fn():
     from models.level3_elastic_net import make_enet_expected_returns_fn
     return make_enet_expected_returns_fn(loss="huber")
@@ -112,7 +108,6 @@ MODELS = [
     ("1/N",            _equal_weight_fn, "data_clean/level0_results.csv",    True),
     ("FF5",            _ff5_fn,          "data_clean/level1_results_v1.csv",  False),
     ("VAR-FF5",        _var_ff5_fn,      "data_clean/level2_results_v1.csv",  False),
-    ("Enet OLS",       _enet_ols_fn,     None,                                False),
     ("Enet Huber",     _enet_huber_fn,   None,                                False),
     ("RF",             _rf_fn,           "data_clean/level4_rf_results.csv",  False),
 ]
@@ -355,7 +350,7 @@ def main() -> None:
     print_primary_table(primary_df)
 
     # ── Frontier summary (ML models only) ────────────────────────────────────
-    ml_labels = ["Enet OLS", "Enet Huber", "RF"]
+    ml_labels = ["Enet Huber", "RF"]
     ml_df = frontier_df[frontier_df["model"].isin(ml_labels)].copy()
     if len(ml_df) > 0:
         print("\n" + "=" * 75)

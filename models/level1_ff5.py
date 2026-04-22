@@ -265,7 +265,7 @@ if __name__ == "__main__":
     from portfolio.metrics  import evaluate_results, print_benchmark_comparison
 
     print("\n" + "=" * 60)
-    print("LEVEL 1: FAMA-FRENCH 5-FACTOR — 1980 to 2024")
+    print("LEVEL 1: FAMA-FRENCH 5-FACTOR — 2005 to 2024")
     print("=" * 60)
 
     # --------------------------------------------------------
@@ -276,7 +276,7 @@ if __name__ == "__main__":
     try:
         from portfolio.config import PANEL_PATH
     except ImportError:
-        PANEL_PATH = "data_clean/master_panel.csv"
+        PANEL_PATH = "data_clean/master_panel_v2.csv"
     data_path = PANEL_PATH
     print(f"\nLoading master panel from: {data_path}")
     master = pd.read_csv(data_path, low_memory=False)
@@ -288,16 +288,12 @@ if __name__ == "__main__":
     print(f"Master panel loaded: {master.shape}")
 
     # --------------------------------------------------------
-    # Run backtest: Jan 1980 – Dec 2024
-    #
-    # Start year is 1980: the 60-month estimation window (Jan 1975–Dec 1979)
-    # has solid Compustat/CCM coverage throughout, avoiding the thin early-
-    # sample universe present in the 1975–1979 period. Individual stocks
-    # additionally require MIN_OBS=48 non-missing observations (80% coverage).
+    # Run backtest: Jan 2005 – Dec 2024
+    # Aligned with the ML model evaluation window.
     # --------------------------------------------------------
     results = run_backtest(
         master,
-        start_year=1980, start_month=1,
+        start_year=2005, start_month=1,
         end_year=2024,   end_month=12,
         risk_aversion=1.0,
         window=60,

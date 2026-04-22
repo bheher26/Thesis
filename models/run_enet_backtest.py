@@ -51,51 +51,51 @@ master["permno"] = pd.to_numeric(master["permno"], errors="coerce").astype(int)
 master["ret_adjusted"] = pd.to_numeric(master["ret_adjusted"], errors="coerce")
 print(f"Loaded: {master.shape}")
 
-# ── Run backtest for each loss variant ────────────────────────────────────────
-for loss in ("ols", "huber"):
-    print(f"\n{'='*60}")
-    print(f"ELASTIC NET — {loss.upper()} LOSS  ({START_YEAR}–{END_YEAR})")
-    print(f"{'='*60}")
+# ── Run backtest (Huber loss only) ────────────────────────────────────────────
+loss = "huber"
+print(f"\n{'='*60}")
+print(f"ELASTIC NET — HUBER LOSS  ({START_YEAR}–{END_YEAR})")
+print(f"{'='*60}")
 
-    expected_returns_fn = make_enet_expected_returns_fn(
-        loss=loss,
-        output_dir=OUTPUT_DIR,
-    )
+expected_returns_fn = make_enet_expected_returns_fn(
+    loss=loss,
+    output_dir=OUTPUT_DIR,
+)
 
-    results = run_backtest(
-        master,
-        start_year=START_YEAR, start_month=START_MONTH,
-        end_year=END_YEAR,     end_month=END_MONTH,
-        risk_aversion=RISK_AVERSION,
-        window=WINDOW,
-        cost_bps=COST_BPS,
-        expected_returns_fn=expected_returns_fn,
-        max_turnover=MAX_TURNOVER,
-    )
+results = run_backtest(
+    master,
+    start_year=START_YEAR, start_month=START_MONTH,
+    end_year=END_YEAR,     end_month=END_MONTH,
+    risk_aversion=RISK_AVERSION,
+    window=WINDOW,
+    cost_bps=COST_BPS,
+    expected_returns_fn=expected_returns_fn,
+    max_turnover=MAX_TURNOVER,
+)
 
-    print(f"\nBacktest complete: {len(results)} months.")
+print(f"\nBacktest complete: {len(results)} months.")
 
-    summary = evaluate_results(results, rf_series=None)
+summary = evaluate_results(results, rf_series=None)
 
-    print(f"\n{'='*60}")
-    print(f"LEVEL 3 ({loss.upper()}) PERFORMANCE SUMMARY")
-    print(f"{'='*60}")
-    print(f"  Annualised net Sharpe    : {summary['annualized_net_sharpe']:.3f}")
-    print(f"  Annualised gross Sharpe  : {summary['annualized_gross_sharpe']:.3f}")
-    print(f"  Annualised gross return  : {summary['annualized_gross_return']*100:.2f}%")
-    print(f"  Annualised net return    : {summary['annualized_net_return']*100:.2f}%")
-    print(f"  Annualised volatility    : {summary['annualized_volatility']*100:.2f}%")
-    print(f"  Max drawdown             : {summary['max_drawdown']*100:.2f}%")
-    avg_to = results["turnover"].mean() * 100
-    cap_str = f"{MAX_TURNOVER*100:.0f}%" if MAX_TURNOVER is not None else "none"
-    print(f"  Avg monthly turnover     : {avg_to:.1f}%  (cap={cap_str})")
-    print(f"  Avg monthly cost         : {summary['avg_monthly_cost_bps']:.2f} bps")
-    print(f"{'='*60}")
+print(f"\n{'='*60}")
+print(f"LEVEL 3 (HUBER) PERFORMANCE SUMMARY")
+print(f"{'='*60}")
+print(f"  Annualised net Sharpe    : {summary['annualized_net_sharpe']:.3f}")
+print(f"  Annualised gross Sharpe  : {summary['annualized_gross_sharpe']:.3f}")
+print(f"  Annualised gross return  : {summary['annualized_gross_return']*100:.2f}%")
+print(f"  Annualised net return    : {summary['annualized_net_return']*100:.2f}%")
+print(f"  Annualised volatility    : {summary['annualized_volatility']*100:.2f}%")
+print(f"  Max drawdown             : {summary['max_drawdown']*100:.2f}%")
+avg_to = results["turnover"].mean() * 100
+cap_str = f"{MAX_TURNOVER*100:.0f}%" if MAX_TURNOVER is not None else "none"
+print(f"  Avg monthly turnover     : {avg_to:.1f}%  (cap={cap_str})")
+print(f"  Avg monthly cost         : {summary['avg_monthly_cost_bps']:.2f} bps")
+print(f"{'='*60}")
 
-    print_benchmark_comparison(f"level3_{loss}", summary, results_df=results)
+print_benchmark_comparison("level3_huber", summary, results_df=results)
 
-    out_path = f"data_clean/level3_{loss}_results.csv"
-    results.to_csv(out_path, index=False)
-    print(f"\nSaved → {out_path}")
+out_path = "data_clean/level3_huber_results.csv"
+results.to_csv(out_path, index=False)
+print(f"\nSaved → {out_path}")
 
 print("\nDone.")

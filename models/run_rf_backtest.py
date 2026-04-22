@@ -31,7 +31,7 @@ from portfolio.metrics import evaluate_results, print_benchmark_comparison
 try:
     from portfolio.config import PANEL_PATH as MASTER_PATH  # type: ignore
 except ImportError:
-    MASTER_PATH = "data_clean/master_panel.csv"
+    MASTER_PATH = "data_clean/master_panel_v2.csv"
 OUTPUT_DIR  = "data_clean/random_forest"
 START_YEAR, START_MONTH = 2005, 1
 END_YEAR,   END_MONTH   = 2024, 12

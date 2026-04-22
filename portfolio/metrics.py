@@ -1,6 +1,7 @@
 import os
 import numpy as np
 import pandas as pd
+from scipy import stats as _scipy_stats
 
 # ============================================================
 # Portfolio Performance Metrics
@@ -248,6 +249,112 @@ def print_benchmark_comparison(current_label, current_summary,
               f"{fmt.format(v1):>19}{unit}  "
               f"{sign}{fmt.format(diff):>9}{unit}")
     print("=" * 60)
+
+
+# ============================================================
+# CAPM Alpha / Beta
+# ============================================================
+
+_FF5_PATH = "data_raw/ff_factors_monthly.csv"
+_FF5_CAPM_CACHE = None
+
+
+def _load_ff5_capm():
+    """Load FF5 file and return DataFrame with year, month, mkt_rf, rf (decimal)."""
+    global _FF5_CAPM_CACHE
+    if _FF5_CAPM_CACHE is not None:
+        return _FF5_CAPM_CACHE
+    ff = pd.read_csv(_FF5_PATH, skiprows=4)
+    ff.columns = [c.strip().lower().replace("-", "_") for c in ff.columns]
+    ff = ff.rename(columns={ff.columns[0]: "date"})
+    ff["date"] = pd.to_numeric(ff["date"], errors="coerce")
+    ff = ff[ff["date"] >= 190001].copy()
+    ff["date"] = ff["date"].astype(int)
+    ff["year"]  = ff["date"] // 100
+    ff["month"] = ff["date"] % 100
+    for col in ["mkt_rf", "rf"]:
+        ff[col] = pd.to_numeric(ff[col], errors="coerce") / 100.0
+    _FF5_CAPM_CACHE = ff[["year", "month", "mkt_rf", "rf"]].copy()
+    return _FF5_CAPM_CACHE
+
+
+def compute_capm_alpha(results_df):
+    """
+    Run a CAPM regression of the portfolio's net excess returns on the market
+    excess return (Mkt-RF from Ken French's data library).
+
+    Parameters
+    ----------
+    results_df : pd.DataFrame
+        Output of run_backtest(). Must contain year, month, net_return.
+
+    Returns
+    -------
+    dict with keys:
+        capm_alpha        : annualised Jensen's alpha (decimal)
+        capm_alpha_pct    : annualised alpha in percent
+        capm_beta         : market beta
+        capm_alpha_tstat  : t-statistic on the alpha
+        capm_alpha_pvalue : two-sided p-value on alpha
+        capm_r2           : R-squared of regression
+        capm_n            : number of months used
+    All NaN if FF5 data unavailable.
+    """
+    nan_result = {
+        "capm_alpha": np.nan, "capm_alpha_pct": np.nan,
+        "capm_beta": np.nan, "capm_alpha_tstat": np.nan,
+        "capm_alpha_pvalue": np.nan, "capm_r2": np.nan, "capm_n": np.nan,
+    }
+    try:
+        ff = _load_ff5_capm()
+    except Exception:
+        return nan_result
+
+    df = results_df.copy()
+    df.columns = [c.strip().lower() for c in df.columns]
+
+    # Portfolio row (year t, month t) holds the return earned in month t+1
+    # (weights built at t, realized returns from t+1).  Shift dates forward
+    # by one month so factor data aligns with actual return period.
+    dates = pd.to_datetime({"year": df["year"], "month": df["month"], "day": 1})
+    next_dates = dates + pd.DateOffset(months=1)
+    df["_ret_year"]  = next_dates.dt.year
+    df["_ret_month"] = next_dates.dt.month
+    df = df.merge(
+        ff.rename(columns={"year": "_ret_year", "month": "_ret_month"}),
+        on=["_ret_year", "_ret_month"], how="left"
+    )
+
+    df["excess_net"] = df["net_return"] - df["rf"]
+    df = df.dropna(subset=["excess_net", "mkt_rf"])
+
+    if len(df) < 12:
+        return nan_result
+
+    y = df["excess_net"].values
+    x = df["mkt_rf"].values
+
+    slope, intercept, r_value, p_value, se_slope = _scipy_stats.linregress(x, y)
+
+    # t-stat and p-value for alpha (intercept)
+    n = len(y)
+    x_mean = x.mean()
+    ss_x = np.sum((x - x_mean) ** 2)
+    residuals = y - (intercept + slope * x)
+    s2 = np.sum(residuals ** 2) / (n - 2)
+    se_alpha = np.sqrt(s2 * (1.0 / n + x_mean ** 2 / ss_x))
+    t_alpha = intercept / se_alpha
+    p_alpha = 2 * _scipy_stats.t.sf(abs(t_alpha), df=n - 2)
+
+    return {
+        "capm_alpha":        round(intercept * 12, 6),       # annualised
+        "capm_alpha_pct":    round(intercept * 12 * 100, 4), # annualised %
+        "capm_beta":         round(slope, 4),
+        "capm_alpha_tstat":  round(t_alpha, 4),
+        "capm_alpha_pvalue": round(p_alpha, 4),
+        "capm_r2":           round(r_value ** 2, 4),
+        "capm_n":            int(n),
+    }
 
 
 # ============================================================

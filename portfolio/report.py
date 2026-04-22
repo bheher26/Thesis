@@ -30,7 +30,7 @@ import matplotlib.dates as mdates
 from matplotlib.ticker import FuncFormatter
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-from portfolio.metrics import evaluate_results
+from portfolio.metrics import evaluate_results, compute_capm_alpha
 
 # ============================================================
 # Configuration
@@ -38,11 +38,11 @@ from portfolio.metrics import evaluate_results
 
 MODELS = [
     ("level0",      "data_clean/level0_results.csv",          "Level 0",   "1/N Equal-Weight"),
-    ("level1",      "data_clean/level1_results.csv",          "Level 1",   "FF5 Static"),
+    ("level1",      "data_clean/level1_results.csv",           "Level 1",   "FF5 Static"),
     ("level1_5",    "data_clean/level_1_5_results.csv",       "Level 1.5", "FF5 + Macro Ridge"),
     ("level2",      "data_clean/level2_results.csv",          "Level 2",   "VAR-FF5"),
-    ("level3_ols",  "data_clean/level3_ols_results.csv",      "Level 3a",  "Elastic Net (OLS)"),
-    ("level3_huber","data_clean/level3_huber_results.csv",    "Level 3b",  "Elastic Net (Huber)"),
+    ("level3_huber","data_clean/level3_huber_results.csv",    "Level 3",   "Elastic Net (Huber)"),
+    ("level4",      "data_clean/level4_rf_results.csv",       "Level 4",   "Random Forest"),
 ]
 
 RECESSION_PATH  = "data_clean/USREC_Dates.csv"
@@ -60,8 +60,8 @@ COLORS = {
     "level1":       "#0077BB",
     "level1_5":     "#EE7733",
     "level2":       "#009988",
-    "level3_ols":   "#CC3311",
-    "level3_huber": "#AA3377",
+    "level3_huber": "#CC3311",
+    "level4":       "#332288",
 }
 
 plt.rcParams.update({
@@ -112,7 +112,8 @@ def load_models():
             # Clip to the common evaluation window
             df = df[(df["year"] >= EVAL_START_YEAR) & (df["year"] <= EVAL_END_YEAR)]
             summary = evaluate_results(df, rf_series=None)
-            data[key] = {"df": df, "summary": summary, "short": short, "long": long_label}
+            capm    = compute_capm_alpha(df.reset_index())
+            data[key] = {"df": df, "summary": summary, "capm": capm, "short": short, "long": long_label}
         except Exception as exc:
             print(f"  [error] {path}: {exc}")
     return data
@@ -157,16 +158,21 @@ def _date_axis(ax):
 # ============================================================
 
 _SUMMARY_SPEC = [
-    # (key, display label, python format, unit suffix, multiplier)
-    ("annualized_net_sharpe",         "Net Sharpe (ann.)",       "{:.3f}", "",     1),
-    ("annualized_gross_sharpe",       "Gross Sharpe (ann.)",     "{:.3f}", "",     1),
-    ("annualized_sortino",            "Sortino (ann.)",          "{:.3f}", "",     1),
-    ("annualized_net_return",         "Net Return (ann.)",       "{:.2f}", "%",  100),
-    ("annualized_volatility",         "Volatility (ann.)",       "{:.2f}", "%",  100),
-    ("annualized_downside_deviation", "Downside Dev. (ann.)",    "{:.4f}", "",     1),
-    ("max_drawdown",                  "Max Drawdown",            "{:.2f}", "%",  100),
-    ("avg_monthly_turnover",          "Avg Turnover/Month",      "{:.1f}", "%",  100),
-    ("avg_monthly_cost_bps",          "Avg Cost/Month",          "{:.2f}", "bps",  1),
+    # (key, display label, python format, unit suffix, multiplier, source)
+    # source: "summary" or "capm"
+    ("annualized_net_sharpe",         "Net Sharpe (ann.)",       "{:.3f}", "",     1,    "summary"),
+    ("annualized_gross_sharpe",       "Gross Sharpe (ann.)",     "{:.3f}", "",     1,    "summary"),
+    ("annualized_sortino",            "Sortino (ann.)",          "{:.3f}", "",     1,    "summary"),
+    ("annualized_net_return",         "Net Return (ann.)",       "{:.2f}", "%",  100,    "summary"),
+    ("annualized_volatility",         "Volatility (ann.)",       "{:.2f}", "%",  100,    "summary"),
+    ("annualized_downside_deviation", "Downside Dev. (ann.)",    "{:.4f}", "",     1,    "summary"),
+    ("max_drawdown",                  "Max Drawdown",            "{:.2f}", "%",  100,    "summary"),
+    ("avg_monthly_turnover",          "Avg Turnover/Month",      "{:.1f}", "%",  100,    "summary"),
+    ("avg_monthly_cost_bps",          "Avg Cost/Month",          "{:.2f}", "bps",  1,    "summary"),
+    ("capm_alpha_pct",                "CAPM Alpha (ann. %)",     "{:.2f}", "%",    1,    "capm"),
+    ("capm_alpha_tstat",              "Alpha t-stat",            "{:.2f}", "",     1,    "capm"),
+    ("capm_beta",                     "Market Beta",             "{:.3f}", "",     1,    "capm"),
+    ("capm_r2",                       "CAPM R²",                 "{:.3f}", "",     1,    "capm"),
 ]
 
 
@@ -184,11 +190,11 @@ def save_summary_table(models_data):
 
     # --- CSV ---
     csv_rows = {}
-    for key, label, fmt, unit, mult in _SUMMARY_SPEC:
+    for key, label, fmt, unit, mult, src in _SUMMARY_SPEC:
         csv_rows[label] = {
             m["short"]: (
-                round(m["summary"][key] * mult, 4)
-                if m["summary"].get(key) is not None and not np.isnan(m["summary"].get(key, float("nan")))
+                round(m[src][key] * mult, 4)
+                if m[src].get(key) is not None and not np.isnan(m[src].get(key, float("nan")))
                 else np.nan
             )
             for m in ordered
@@ -211,10 +217,10 @@ def save_summary_table(models_data):
     print(f"  {'Metric':<{label_w}}" + "".join(f"  {m['short']:>{col_w}}" for m in ordered))
     print(f"  {'':<{label_w}}"       + "".join(f"  {m['long']:>{col_w}}"  for m in ordered))
     print(thin)
-    for key, label, fmt, unit, mult in _SUMMARY_SPEC:
+    for key, label, fmt, unit, mult, src in _SUMMARY_SPEC:
         row = f"  {label:<{label_w}}"
         for m in ordered:
-            row += f"  {_fmt_cell(m['summary'].get(key), fmt, unit, mult):>{col_w}}"
+            row += f"  {_fmt_cell(m[src].get(key), fmt, unit, mult):>{col_w}}"
         print(row)
     print(sep + "\n")
 
