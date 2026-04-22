@@ -1,7 +1,10 @@
 import os
 import numpy as np
 import pandas as pd
-from scipy.optimize import minimize
+import osqp
+import scipy.sparse as sp
+from tqdm import tqdm
+
 
 from portfolio.covariance import build_returns_matrix, build_ret_panel, build_mktcap_panel, estimate_factor_covariance
 
@@ -50,44 +53,53 @@ def optimize_portfolio(expected_returns, covariance, risk_aversion=1.0,
     Sigma = covariance
 
     # --------------------------------------------------------
-    # Objective: minimise (lambda/2) w'Sigma w - mu'w
-    # Gradient provided for faster convergence with SLSQP
+    # OSQP formulation:
+    #   minimize  (1/2) w' P w + q' w
+    #   subject to  l <= A w <= u
+    #
+    # P = risk_aversion * Sigma  (upper triangular sparse)
+    # q = -mu
+    # A = [1...1 ; I_N]          (sum-to-one + box constraints)
+    # l = [1,  0, ..., 0]
+    # u = [1,  max_weight, ..., max_weight]
     # --------------------------------------------------------
-    def objective(w):
-        return (risk_aversion / 2.0) * w @ Sigma @ w - mu @ w
+    P = sp.csc_matrix(risk_aversion * np.triu(Sigma))
+    q = -mu
 
-    def gradient(w):
-        return risk_aversion * Sigma @ w - mu
+    ones_row = sp.csc_matrix(np.ones((1, N)))
+    A = sp.vstack([ones_row, sp.eye(N)], format="csc")
 
-    # --------------------------------------------------------
-    # Constraints and bounds
-    # Equality: weights sum to 1 (fully invested)
-    # Bounds: 0 <= w_i <= max_weight (long only, concentration cap)
-    # --------------------------------------------------------
-    constraints = {"type": "eq", "fun": lambda w: np.sum(w) - 1.0}
-    bounds = [(0.0, max_weight)] * N
+    l = np.concatenate([[1.0], np.zeros(N)])
+    u = np.concatenate([[1.0], np.full(N, max_weight)])
 
-    # Equal-weight initialisation — neutral starting point
-    w0 = np.ones(N) / N
-
-    result = minimize(
-        objective,
-        w0,
-        jac=gradient,
-        method="SLSQP",
-        bounds=bounds,
-        constraints=constraints,
-        options={"ftol": 1e-9, "maxiter": 1000},
+    solver = osqp.OSQP()
+    solver.setup(
+        P, q, A, l, u,
+        warm_starting=True,
+        verbose=False,
+        eps_abs=1e-6,
+        eps_rel=1e-6,
+        max_iter=10000,
+        polish=True,
     )
+    result = solver.solve()
 
-    if not result.success:
-        print(f"  WARNING: Optimiser did not converge — {result.message}")
-        print("  Falling back to equal-weight portfolio.")
-        weights = pd.Series(w0, index=expected_returns.index)
+    w0 = np.ones(N) / N
+    if result.info.status in ("solved", "solved_inaccurate"):
+        w = np.clip(result.x, 0.0, max_weight)
+        w_sum = w.sum()
+        if w_sum > 0:
+            w = w / w_sum
+        else:
+            print("  WARNING: OSQP returned zero weights — falling back to equal-weight.")
+            w = w0
+        if result.info.status == "solved_inaccurate":
+            print("  WARNING: OSQP solved_inaccurate — solution may be approximate.")
     else:
-        weights = pd.Series(result.x, index=expected_returns.index)
+        print(f"  WARNING: OSQP failed ({result.info.status}) — falling back to equal-weight.")
+        w = w0
 
-    return weights
+    return pd.Series(w, index=expected_returns.index)
 
 
 # ============================================================
@@ -261,8 +273,10 @@ def run_backtest(master_df, start_year, start_month, end_year, end_month,
     print(f"  risk_aversion={risk_aversion}, window={window}m, cost={cost_bps}bps")
     print("-" * 60)
 
-    for period in all_periods:
+    pbar = tqdm(all_periods, desc="Backtest", unit="month", ncols=80)
+    for period in pbar:
         y, m = period.year, period.month
+        pbar.set_postfix({"month": f"{y}-{m:02d}"})
         print(f"\n[{y}-{m:02d}]")
 
         # --------------------------------------------------------
@@ -408,6 +422,7 @@ def run_backtest(master_df, start_year, start_month, end_year, end_month,
         # Update previous weights for next iteration's turnover calculation
         weights_prev = weights
 
+    pbar.close()
     results = pd.DataFrame(records)
     return results
 
