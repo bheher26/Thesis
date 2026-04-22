@@ -6,7 +6,7 @@ import scipy.sparse as sp
 from tqdm import tqdm
 
 
-from portfolio.covariance import build_returns_matrix, build_ret_panel, build_mktcap_panel, estimate_factor_covariance
+from portfolio.covariance import build_returns_matrix, build_ret_panel, build_mktcap_panel, estimate_covariance
 
 print("\nPortfolio Optimizer Module")
 print("Running from directory:", os.getcwd())
@@ -310,9 +310,9 @@ def run_backtest(master_df, start_year, start_month, end_year, end_month,
             print(f"  Weights assigned directly: {len(weights)} assets (no optimiser)")
         else:
             # Step 2: Estimate factor model covariance (FF5-based)
-            cov_result = estimate_factor_covariance(ret_matrix, y, m)
+            cov_result = estimate_covariance(ret_matrix)
             Sigma = cov_result.covariance
-            delta = cov_result.delta   # avg factor R² across stocks
+            delta = cov_result.delta   # Ledoit-Wolf shrinkage intensity
 
             # Step 3: Expected returns — provided model or trailing sample mean
             if expected_returns_fn is None:

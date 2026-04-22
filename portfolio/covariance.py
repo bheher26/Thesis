@@ -309,7 +309,7 @@ def estimate_factor_covariance(returns_matrix, year, month):
 # Helper: Build Clean Returns Matrix from Master Panel
 # ============================================================
 
-UNIVERSE_CAP = 1000   # maximum stocks per month ranked by market cap
+UNIVERSE_CAP = 500    # maximum stocks per month ranked by market cap
 
 
 def build_ret_panel(master_df):
