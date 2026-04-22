@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from scipy.optimize import minimize
 
-from portfolio.covariance import build_returns_matrix, build_ret_panel, estimate_factor_covariance
+from portfolio.covariance import build_returns_matrix, build_ret_panel, build_mktcap_panel, estimate_factor_covariance
 
 print("\nPortfolio Optimizer Module")
 print("Running from directory:", os.getcwd())
@@ -250,6 +250,12 @@ def run_backtest(master_df, start_year, start_month, end_year, end_month,
     print("  Pre-building wide returns panel...")
     ret_panel = build_ret_panel(master_df)
     print(f"  Returns panel shape: {ret_panel.shape}")
+    print("  Pre-building market cap panel...")
+    mktcap_panel = build_mktcap_panel(master_df)
+    if mktcap_panel is not None:
+        print(f"  Market cap panel shape: {mktcap_panel.shape}")
+    else:
+        print("  Market cap panel: not available (market_cap column missing)")
 
     print(f"\nRunning backtest: {start_year}-{start_month:02d} to {end_year}-{end_month:02d}")
     print(f"  risk_aversion={risk_aversion}, window={window}m, cost={cost_bps}bps")
@@ -264,7 +270,8 @@ def run_backtest(master_df, start_year, start_month, end_year, end_month,
         # --------------------------------------------------------
         try:
             ret_matrix = build_returns_matrix(master_df, y, m, window=window,
-                                              ret_panel=ret_panel)
+                                              ret_panel=ret_panel,
+                                              mktcap_panel=mktcap_panel)
         except Exception as e:
             print(f"  SKIP — build_returns_matrix failed: {e}")
             continue

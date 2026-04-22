@@ -309,6 +309,9 @@ def estimate_factor_covariance(returns_matrix, year, month):
 # Helper: Build Clean Returns Matrix from Master Panel
 # ============================================================
 
+UNIVERSE_CAP = 1000   # maximum stocks per month ranked by market cap
+
+
 def build_ret_panel(master_df):
     """
     Pre-pivot the full master panel into a wide (year, month) × permno
@@ -333,7 +336,29 @@ def build_ret_panel(master_df):
     return ret_panel
 
 
-def build_returns_matrix(master_df, year, month, window=60, ret_panel=None):
+def build_mktcap_panel(master_df):
+    """
+    Pre-pivot market_cap into a wide (year, month) × permno panel.
+    Used to apply the top-UNIVERSE_CAP filter in build_returns_matrix.
+
+    Returns
+    -------
+    mktcap_panel : pd.DataFrame
+        MultiIndex(year, month) rows × permno columns, values = market_cap.
+    """
+    if "market_cap" not in master_df.columns:
+        return None
+    mktcap_panel = (
+        master_df.groupby(["year", "month", "permno"])["market_cap"]
+        .mean()
+        .unstack("permno")
+    )
+    mktcap_panel.index.names = ["year", "month"]
+    return mktcap_panel
+
+
+def build_returns_matrix(master_df, year, month, window=60,
+                         ret_panel=None, mktcap_panel=None):
     """
     Slice the master panel to the trailing `window` months ending at
     (year, month) inclusive, then pivot to a clean (T x N) returns matrix.
@@ -408,6 +433,37 @@ def build_returns_matrix(master_df, year, month, window=60, ret_panel=None):
     ret_wide = ret_wide.dropna(axis=1, thresh=int(T_actual - max_missing))
     n_after = ret_wide.shape[1]
     print(f"  Stocks before/after 20%-missing filter: {n_before} -> {n_after}")
+
+    # --------------------------------------------------------
+    # Top-UNIVERSE_CAP filter by market cap at formation month
+    # Ranks stocks by market cap in (year, month) and keeps the
+    # largest UNIVERSE_CAP that also passed the missingness filter.
+    # --------------------------------------------------------
+    if ret_wide.shape[1] > UNIVERSE_CAP:
+        formation_key = (year, month)
+        mktcap_row = None
+
+        if mktcap_panel is not None:
+            try:
+                mktcap_row = mktcap_panel.loc[(year, month)].reindex(ret_wide.columns)
+            except KeyError:
+                mktcap_row = None
+        elif "market_cap" in master_df.columns:
+            # Fallback: compute from master_df directly
+            mc = (
+                master_df[(master_df["year"] == year) & (master_df["month"] == month)]
+                .groupby("permno")["market_cap"].mean()
+            )
+            mktcap_row = mc.reindex(ret_wide.columns)
+
+        if mktcap_row is not None and mktcap_row.notna().sum() >= 50:
+            # Rank by market cap; stocks missing market cap get rank last (treated as smallest)
+            mktcap_filled = mktcap_row.fillna(0.0)
+            top_permnos = mktcap_filled.nlargest(UNIVERSE_CAP).index
+            ret_wide = ret_wide[top_permnos]
+            print(f"  Top-{UNIVERSE_CAP} market cap filter: {n_after} -> {ret_wide.shape[1]} stocks")
+        else:
+            print(f"  Top-{UNIVERSE_CAP} filter skipped: insufficient market cap data")
 
     # --------------------------------------------------------
     # Fill any remaining gaps with column mean (small imputation)
