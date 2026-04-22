@@ -5,7 +5,7 @@ from collections import namedtuple
 from sklearn.covariance import LedoitWolf
 
 # ============================================================
-# Ledoit-Wolf Shrinkage Covariance Estimator
+# Covariance Estimators
 # portfolio/covariance.py
 #
 # Provides:
@@ -17,7 +17,9 @@ from sklearn.covariance import LedoitWolf
 # and the shrinkage intensity delta so the caller can log it.
 # ============================================================
 
-# Named tuple for clean, unambiguous return values
+# Named tuple for clean, unambiguous return values.
+# delta: shrinkage intensity (Ledoit-Wolf) or fraction of variance explained
+#        by factors (factor model) — logged in results CSV as a diagnostic.
 CovarianceResult = namedtuple("CovarianceResult", ["covariance", "delta"])
 
 
@@ -144,6 +146,163 @@ def estimate_covariance(returns_matrix, shrinkage_target="constant_correlation")
     covariance = (1.0 - delta) * S + delta * target
 
     return CovarianceResult(covariance=covariance, delta=delta)
+
+
+# ============================================================
+# FF5 Factor Data Loader (cached)
+# ============================================================
+
+_FF5_COV_CACHE = None
+_FF5_FACTORS   = ["mkt_rf", "smb", "hml", "rmw", "cma"]
+_FF5_PATH      = "data_raw/ff_factors_monthly.csv"
+
+
+def _load_ff5_for_cov():
+    """Load FF5 factor returns; cached after first call."""
+    global _FF5_COV_CACHE
+    if _FF5_COV_CACHE is not None:
+        return _FF5_COV_CACHE
+    ff = pd.read_csv(_FF5_PATH, skiprows=4)
+    ff.columns = [c.strip().lower().replace("-", "_") for c in ff.columns]
+    ff = ff.rename(columns={ff.columns[0]: "date"})
+    ff["date"] = pd.to_numeric(ff["date"], errors="coerce")
+    ff = ff[ff["date"] >= 190001].copy()
+    ff["date"]  = ff["date"].astype(int)
+    ff["year"]  = ff["date"] // 100
+    ff["month"] = ff["date"] % 100
+    for col in _FF5_FACTORS + ["rf"]:
+        ff[col] = pd.to_numeric(ff[col], errors="coerce") / 100.0
+    _FF5_COV_CACHE = ff[["year", "month"] + _FF5_FACTORS + ["rf"]].copy()
+    return _FF5_COV_CACHE
+
+
+# ============================================================
+# Factor Model Covariance Estimator
+# ============================================================
+
+def estimate_factor_covariance(returns_matrix, year, month):
+    """
+    Estimate a Fama-French 5-factor model covariance matrix.
+
+    Decomposes the N×N covariance into a low-rank factor component
+    and a diagonal idiosyncratic component:
+
+        Σ = B @ F @ B' + D
+
+    where:
+        B : (N, K) matrix of factor loadings estimated by OLS
+        F : (K, K) factor covariance matrix (K=5, always T>>K)
+        D : (N, N) diagonal matrix of idiosyncratic variances
+
+    This approach is valid for any N regardless of T because F is
+    only K×K (K=5) and each row of B is estimated independently.
+    The result is always symmetric positive definite by construction.
+
+    Parameters
+    ----------
+    returns_matrix : pd.DataFrame, shape (T, N)
+        Rolling returns matrix from build_returns_matrix(). Index is
+        (year, month) MultiIndex; columns are permno.
+    year, month : int
+        Portfolio formation date — used to align FF5 factor data and
+        enforce no look-ahead (only months in returns_matrix used).
+
+    Returns
+    -------
+    CovarianceResult
+        .covariance : np.ndarray, shape (N, N)
+        .delta      : float — fraction of cross-sectional return
+                      variance explained by the 5 factors (avg R²),
+                      logged in results CSV as a diagnostic.
+    """
+    if isinstance(returns_matrix, np.ndarray):
+        R = returns_matrix
+        permnos = None
+    else:
+        R = returns_matrix.values
+        permnos = returns_matrix.columns
+
+    T, N = R.shape
+    print(f"  Estimating factor covariance: T={T} observations, N={N} assets")
+
+    # ── Align FF5 factors to the exact window months ──────────────────────
+    ff = _load_ff5_for_cov()
+
+    if isinstance(returns_matrix, pd.DataFrame):
+        window_idx = returns_matrix.index   # MultiIndex (year, month)
+        window_df  = pd.DataFrame({
+            "year":  window_idx.get_level_values("year"),
+            "month": window_idx.get_level_values("month"),
+        })
+    else:
+        # Fallback: can't align without index info — use last T months up to (year, month)
+        end = pd.Period(f"{year}-{month:02d}", freq="M")
+        periods = pd.period_range(end=end, periods=T, freq="M")
+        window_df = pd.DataFrame({
+            "year":  [p.year  for p in periods],
+            "month": [p.month for p in periods],
+        })
+
+    ff_window = ff.merge(window_df, on=["year", "month"], how="inner")
+    ff_window = ff_window.set_index(["year", "month"])
+
+    F_mat = ff_window[_FF5_FACTORS].values   # (T_f, 5)
+    rf    = ff_window["rf"].values           # (T_f,)
+
+    # Align returns rows to factor rows (inner join on dates)
+    T_f = len(F_mat)
+    if isinstance(returns_matrix, pd.DataFrame):
+        R_aligned = returns_matrix.reindex(ff_window.index).values  # (T_f, N)
+    else:
+        # Trim to T_f rows (bottom-aligned)
+        R_aligned = R[-T_f:]
+
+    # Excess returns: subtract rf
+    Re = R_aligned - rf[:, None]   # (T_f, N)
+
+    # ── OLS: regress each stock's excess return on the 5 factors ──────────
+    # Model: Re_i = alpha_i + B_i @ F + eps_i
+    # X = [1, F_mat]  shape (T_f, 6)
+    ones = np.ones((T_f, 1))
+    X    = np.hstack([ones, F_mat])          # (T_f, 6)
+    XtX  = X.T @ X                           # (6, 6)
+    XtX_inv = np.linalg.pinv(XtX)           # pinv handles near-singular cases
+    B_full = XtX_inv @ X.T @ Re             # (6, N) — rows: [alpha, b1..b5]
+    B      = B_full[1:, :].T                # (N, 5) — factor loadings only
+
+    # Residuals
+    fitted  = X @ B_full                     # (T_f, N)
+    resid   = Re - fitted                    # (T_f, N)
+
+    # ── Factor covariance F (5×5) ─────────────────────────────────────────
+    F_cov = np.cov(F_mat, rowvar=False)      # (5, 5) — T_f >> 5, well-conditioned
+
+    # ── Idiosyncratic variances D (diagonal) ──────────────────────────────
+    # Use sample variance of residuals per stock; floor at a small positive
+    # value to guarantee positive definiteness.
+    idio_var = np.var(resid, axis=0, ddof=1)           # (N,)
+    idio_var = np.maximum(idio_var, 1e-8)              # floor
+
+    # ── Assemble Σ = B F B' + D ───────────────────────────────────────────
+    systematic = B @ F_cov @ B.T             # (N, N)
+    D          = np.diag(idio_var)           # (N, N)
+    Sigma      = systematic + D
+
+    # Force exact symmetry (eliminate floating-point asymmetry)
+    Sigma = (Sigma + Sigma.T) / 2.0
+
+    # ── Diagnostic: average R² across stocks ─────────────────────────────
+    ss_res   = np.sum(resid ** 2,          axis=0)          # (N,)
+    ss_tot   = np.sum((Re - Re.mean(axis=0)) ** 2, axis=0)  # (N,)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        r2_per_stock = 1.0 - ss_res / ss_tot
+    r2_per_stock = np.where(ss_tot < 1e-12, 0.0, r2_per_stock)
+    avg_r2 = float(np.mean(r2_per_stock))
+
+    print(f"  Factor model: avg R²={avg_r2:.3f}  "
+          f"(systematic var share; idio floor applied to {(idio_var <= 1e-7).sum()} stocks)")
+
+    return CovarianceResult(covariance=Sigma, delta=avg_r2)
 
 
 # ============================================================

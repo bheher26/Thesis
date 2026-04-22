@@ -9,7 +9,7 @@ Must be run from the project root:
     python models/run_rf_backtest.py
 
 Prerequisites:
-    - data_clean/master_panel.csv
+    - data_clean/master_panel_v2.csv
     - data_clean/random_forest/expected_returns_rf.parquet
 
 The parquet is produced by running level4_random_forest.py first:

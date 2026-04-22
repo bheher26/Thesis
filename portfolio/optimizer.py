@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from scipy.optimize import minimize
 
-from portfolio.covariance import build_returns_matrix, build_ret_panel, estimate_covariance
+from portfolio.covariance import build_returns_matrix, build_ret_panel, estimate_factor_covariance
 
 print("\nPortfolio Optimizer Module")
 print("Running from directory:", os.getcwd())
@@ -28,7 +28,7 @@ def optimize_portfolio(expected_returns, covariance, risk_aversion=1.0,
         Expected return for each asset. Index must be asset identifiers
         (e.g. permno). Typically the trailing-window sample mean.
     covariance : np.ndarray, shape (N, N)
-        Shrunk covariance matrix from estimate_covariance().
+        FF5 factor model covariance matrix from estimate_factor_covariance().
         Must be aligned with expected_returns index order.
     risk_aversion : float
         Risk aversion coefficient lambda. Higher = more conservative.
@@ -289,10 +289,10 @@ def run_backtest(master_df, start_year, start_month, end_year, end_month,
             delta = float("nan")
             print(f"  Weights assigned directly: {len(weights)} assets (no optimiser)")
         else:
-            # Step 2: Estimate shrunk covariance matrix
-            cov_result = estimate_covariance(ret_matrix)
+            # Step 2: Estimate factor model covariance (FF5-based)
+            cov_result = estimate_factor_covariance(ret_matrix, y, m)
             Sigma = cov_result.covariance
-            delta = cov_result.delta
+            delta = cov_result.delta   # avg factor R² across stocks
 
             # Step 3: Expected returns — provided model or trailing sample mean
             if expected_returns_fn is None:
@@ -446,7 +446,7 @@ if __name__ == "__main__":
     print("=" * 60)
     print(f"  Months computed       : {len(results)}")
     print(f"  Avg assets per month  : {results['n_assets'].mean():.0f}")
-    print(f"  Avg delta             : {results['delta'].mean():.4f}")
+    print(f"  Avg factor R²         : {results['delta'].mean():.4f}")
     print(f"  Avg gross return      : {results['gross_return'].mean()*100:.2f}% / month")
     print(f"  Avg turnover          : {results['turnover'].mean()*100:.1f}% / month")
     print(f"  Avg transaction cost  : {results['cost'].mean()*10000:.1f} bps / month")
